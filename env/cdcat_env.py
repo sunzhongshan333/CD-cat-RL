@@ -36,6 +36,11 @@ class CDCATEnv:
         self.current_step = 0
         self.current_mean_entropy = None  # \bar{H}_t
 
+        # 预分配热路径张量，避免每步重复申请 GPU 内存
+        self._padded_items = torch.full((1, self.max_steps), -1, dtype=torch.long, device=self.device)
+        self._padded_scores = torch.full((1, self.max_steps), -1, dtype=torch.long, device=self.device)
+        self._step_tensor = torch.zeros(1, dtype=torch.long, device=self.device)
+
     def _sample_simulated_student(self):
         """
         严格对应框架 7.2 节：鲁棒经验采样生成器
@@ -67,21 +72,25 @@ class CDCATEnv:
         调用编码器生成当前状态 s_t，并计算当前的系统不确定性。
         数据收集阶段强制使用 eval 模式，确保 dropout 不干扰经验质量。
         """
-        # 将变长历史转换为带 Padding 的 tensor (batch_size=1)
-        padded_items = torch.full((1, self.max_steps), -1, dtype=torch.long).to(self.device)
-        padded_scores = torch.full((1, self.max_steps), -1, dtype=torch.long).to(self.device)
+        # 复用预分配的 padded tensor，避免热路径上反复申请内存
+        self._padded_items.fill_(-1)
+        self._padded_scores.fill_(-1)
 
         if self.current_step > 0:
-            padded_items[0, :self.current_step] = torch.tensor(self.history_item_ids).to(self.device)
-            padded_scores[0, :self.current_step] = torch.tensor(self.history_scores).to(self.device)
+            t = self.current_step
+            self._padded_items[0, :t] = torch.tensor(
+                self.history_item_ids, dtype=torch.long, device=self.device)
+            self._padded_scores[0, :t] = torch.tensor(
+                self.history_scores, dtype=torch.long, device=self.device)
 
-        current_steps_tensor = torch.tensor([self.current_step], dtype=torch.long).to(self.device)
+        self._step_tensor.fill_(self.current_step)
 
         # 环境推断阶段强制 eval 模式（防止 E-step 训练时 dropout 污染状态）
         was_training = self.encoder.training
         self.encoder.eval()
         with torch.no_grad():
-            s_t, mastery_logits = self.encoder(padded_items, padded_scores, current_steps_tensor)
+            s_t, mastery_logits = self.encoder(
+                self._padded_items, self._padded_scores, self._step_tensor)
             hat_alpha_t = torch.sigmoid(mastery_logits).squeeze(0)  # [num_skills]
         if was_training:
             self.encoder.train()
@@ -157,12 +166,10 @@ class CDCATEnv:
             # 熵达标，诊断成功提前终止，给予正奖励激励智能体尽早完成
             done = True
             reward = 1.0
-        elif self.current_step >= self.max_steps:
-            done = True
-            # 达到最大步数依然未达标，给予最后一次惩罚
-            reward = min(-1.0 + self.beta * entropy_reduction, 0.0)
         else:
-            # 继续测试，硬截断防止刷正奖励
+            # 未达标（含步数耗尽）：硬截断防止刷正奖励
+            if self.current_step >= self.max_steps:
+                done = True
             reward = min(-1.0 + self.beta * entropy_reduction, 0.0)
 
         info = {

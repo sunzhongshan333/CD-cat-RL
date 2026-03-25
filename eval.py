@@ -260,7 +260,7 @@ def _run_track_b_policy(policy, ncdm, encoder, d3qn, grouped,
         current_step = 0
         pad_items  = torch.full((1, max_steps), -1, dtype=torch.long).to(device)
         pad_scores = torch.full((1, max_steps), -1, dtype=torch.long).to(device)
-        step_tensor = torch.tensor([0], dtype=torch.long).to(device)
+        step_tensor = torch.zeros(1, dtype=torch.long, device=device)
 
         if policy == 'full_static':
             # 按原始顺序遍历可用池（最多 max_steps 题）
@@ -269,7 +269,7 @@ def _run_track_b_policy(policy, ncdm, encoder, d3qn, grouped,
                 current_step += 1
                 pad_items[0,  current_step - 1] = action
                 pad_scores[0, current_step - 1] = real_score
-                step_tensor = torch.tensor([current_step], dtype=torch.long).to(device)
+                step_tensor.fill_(current_step)
 
                 # AUC@K 快照
                 with torch.no_grad():
@@ -308,7 +308,7 @@ def _run_track_b_policy(policy, ncdm, encoder, d3qn, grouped,
                 current_step += 1
                 pad_items[0,  current_step - 1] = action
                 pad_scores[0, current_step - 1] = real_score
-                step_tensor = torch.tensor([current_step], dtype=torch.long).to(device)
+                step_tensor.fill_(current_step)
 
                 # AUC@K 快照
                 with torch.no_grad():
