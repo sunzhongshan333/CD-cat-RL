@@ -78,17 +78,7 @@ class CDCATEnv:
         调用编码器生成当前状态 s_t，并计算当前的系统不确定性。
         数据收集阶段强制使用 eval 模式，确保 dropout 不干扰经验质量。
         """
-        # 复用预分配的 padded tensor，避免热路径上反复申请内存
-        self._padded_items.fill_(-1)
-        self._padded_scores.fill_(-1)
-
-        if self.current_step > 0:
-            t = self.current_step
-            self._padded_items[0, :t] = torch.tensor(
-                self.history_item_ids, dtype=torch.long, device=self.device)
-            self._padded_scores[0, :t] = torch.tensor(
-                self.history_scores, dtype=torch.long, device=self.device)
-
+        # _padded_items / _padded_scores 由 reset() 清零、step() 增量写入，此处无需重建
         self._step_tensor.fill_(self.current_step)
 
         # 环境推断阶段强制 eval 模式（防止 E-step 训练时 dropout 污染状态）
@@ -117,6 +107,8 @@ class CDCATEnv:
         self.history_scores = []
         self.available_items = set(range(self.num_items))
         self.current_step = 0
+        self._padded_items.fill_(-1)
+        self._padded_scores.fill_(-1)
 
         # 3. 获取初始状态 s_0 (全空历史)
         s_0, _, _, mean_ent = self._get_current_state_and_entropy()
@@ -157,6 +149,9 @@ class CDCATEnv:
         self.history_scores.append(y_t)
         self.available_items.remove(action_item_id)
         self.current_step += 1
+        # 增量维护预分配的历史张量，避免每步从 Python list 重建
+        self._padded_items[0, self.current_step - 1] = action_item_id
+        self._padded_scores[0, self.current_step - 1] = y_t
 
         s_next, hat_alpha_next, max_entropy, mean_ent_next = self._get_current_state_and_entropy()
 

@@ -55,6 +55,7 @@ RL_PER_EPS = 1e-6           # 优先级平滑常数（防止零优先级）
 RL_LOSS_PLATEAU_WINDOW = 20      # 用于平台检测的损失窗口大小（优化步数）
 RL_LOSS_PLATEAU_MIN_STEPS = 50   # 每阶段至少完成的优化步数后才允许切换
 RL_LOSS_PLATEAU_THRESHOLD = 5e-4 # 窗口前半段与后半段均值差低于此值则认为平台
+RL_E_STEP_NEG_SAMPLES = 512      # E-step 软标签损失的负采样题目数（远小于 num_items=9128）
 
 # ==========================================
 # CD-CAT 环境超参数

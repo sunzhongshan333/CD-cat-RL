@@ -82,7 +82,7 @@ def train_rl_pipeline():
     ncdm = NCDM(num_students, num_items, num_skills).to(device)
     ncdm_ckpt = os.path.join(models_dir, 'ncdm_best.pth')
     try:
-        ncdm.load_state_dict(torch.load(ncdm_ckpt, map_location=device))
+        ncdm.load_state_dict(torch.load(ncdm_ckpt, map_location=device, weights_only=True))
     except FileNotFoundError:
         logger.error("找不到 NCDM 权重文件: %s", ncdm_ckpt)
         raise
@@ -153,6 +153,7 @@ def train_rl_pipeline():
     for episode in pbar:
         # 本 episode 所属阶段（上一步优化后可能已切换，这里生效）
         is_e_step = (current_phase == 'e_step')
+        did_update = False  # 本 episode 是否执行了至少一次参数更新（用于守护 scheduler）
 
         if is_e_step:
             encoder.train()
@@ -206,9 +207,11 @@ def train_rl_pipeline():
                         env.history_item_ids, env.history_scores, env.current_step,
                         mask_t, mask_next, done, true_alpha_t)
 
-            # --- Polyak 软更新目标网络（每步执行，平滑追踪主网络）---
-            for param, target_param in zip(main_d3qn.parameters(), target_d3qn.parameters()):
-                target_param.data.mul_(1.0 - polyak_tau).add_(polyak_tau * param.data)
+            # --- Polyak 软更新目标网络（仅 Q-step 时执行，E-step 时 D3QN 未更新故跳过）---
+            if not is_e_step:
+                with torch.no_grad():
+                    for param, target_param in zip(main_d3qn.parameters(), target_d3qn.parameters()):
+                        target_param.lerp_(param, polyak_tau)
 
             s_t = s_next
 
@@ -232,40 +235,44 @@ def train_rl_pipeline():
                     s_batch, mastery_logits = encoder(b_h_items, b_h_scores, b_steps)
                     hat_alpha = torch.sigmoid(mastery_logits)  # [batch, K]
 
-                    # 2. 构建学生预测的 interaction logits
-                    interaction_pred = hat_alpha.unsqueeze(1) * q_matrix_tensor.unsqueeze(0) * frozen_e_a.unsqueeze(
-                        0) - frozen_e_d.unsqueeze(0)
-                    pred_logits = ncdm.interaction_mlp(interaction_pred).squeeze(-1)  # [batch, num_items]
+                    # 2a. 未答题目上的软标签损失（负采样，避免 [B, J, K] 超大张量）
+                    # 从全量题库随机抽取 N_neg 道题，tensor 从 [B,J,K] 降至 [B,N_neg,K]
+                    neg_idx = torch.randperm(num_items, device=device)[:cfg.RL_E_STEP_NEG_SAMPLES]
+                    # [B, N_neg, K]
+                    interaction_pred_neg = (hat_alpha.unsqueeze(1)
+                                            * q_matrix_tensor[neg_idx].unsqueeze(0)
+                                            * frozen_e_a[neg_idx].unsqueeze(0)
+                                            - frozen_e_d[neg_idx].unsqueeze(0))
+                    pred_logits_neg = ncdm.interaction_mlp(
+                        interaction_pred_neg).squeeze(-1)  # [B, N_neg]
 
-                    # 3. 构建教师给出的真实软标签 (使用模拟的真实状态 alpha^*)
                     with torch.no_grad():
-                        interaction_teacher = b_true_alphas.unsqueeze(1) * q_matrix_tensor.unsqueeze(
-                            0) * frozen_e_a.unsqueeze(0) - frozen_e_d.unsqueeze(0)
-                        target_y = torch.sigmoid(ncdm.interaction_mlp(interaction_teacher).squeeze(-1))
+                        interaction_teacher_neg = (b_true_alphas.unsqueeze(1)
+                                                   * q_matrix_tensor[neg_idx].unsqueeze(0)
+                                                   * frozen_e_a[neg_idx].unsqueeze(0)
+                                                   - frozen_e_d[neg_idx].unsqueeze(0))
+                        target_y_neg = torch.sigmoid(
+                            ncdm.interaction_mlp(interaction_teacher_neg).squeeze(-1))  # [B, N_neg]
 
-                    # 4a. 未答题目上的软标签损失
-                    loss_soft = bce_loss(pred_logits[b_masks], target_y[b_masks])
+                    # 仅对采样子集中未被作答的题目计算软标签损失
+                    neg_unanswered = b_masks[:, neg_idx]  # [B, N_neg]，True=可选（未答）
+                    loss_soft = bce_loss(pred_logits_neg[neg_unanswered],
+                                        target_y_neg[neg_unanswered])
 
-                    # 4b. 已答题目上的真实标签损失（自洽性约束）
-                    # scatter 将稀疏历史 (item_id, score) 展开为 [batch, num_items+1] 密集矩阵：
-                    # padding 位被重定向到哑列 num_items（该列最终被截断丢弃），
-                    # 避免用 index 0 覆盖真实的第 0 题数据。
+                    # 2b. 已答题目上的真实标签损失（自洽性约束，精确按索引计算）
                     valid_h_mask = (b_h_items != -1)                            # [B, T]
-                    safe_h_items = torch.where(
-                        valid_h_mask, b_h_items,
-                        torch.full_like(b_h_items, num_items))                  # padding → 哑列
-                    answered_big = torch.zeros(
-                        batch_size, num_items + 1, dtype=torch.bool, device=device)
-                    answered_big.scatter_(1, safe_h_items, valid_h_mask)
-                    answered_mask = answered_big[:, :num_items]                 # [B, num_items]
-
-                    real_labels_big = torch.zeros(batch_size, num_items + 1, device=device)
-                    real_labels_big.scatter_(1, safe_h_items,
-                                             b_h_scores.clamp(min=0).float())
-                    real_labels = real_labels_big[:, :num_items]                # [B, num_items]
-
-                    if answered_mask.any():
-                        loss_real = bce_loss(pred_logits[answered_mask], real_labels[answered_mask])
+                    if valid_h_mask.any():
+                        b_row = torch.where(valid_h_mask)[0]                    # batch 行索引 [N_ans]
+                        i_col = b_h_items[valid_h_mask]                         # 题目索引   [N_ans]
+                        # [N_ans, K]
+                        interaction_ans = (hat_alpha[b_row]
+                                           * q_matrix_tensor[i_col]
+                                           * frozen_e_a[i_col]
+                                           - frozen_e_d[i_col])
+                        pred_logits_ans = ncdm.interaction_mlp(
+                            interaction_ans).squeeze(-1)                        # [N_ans]
+                        real_labels_ans = b_h_scores[valid_h_mask].clamp(min=0).float()  # [N_ans]
+                        loss_real = bce_loss(pred_logits_ans, real_labels_ans)
                         loss_aux = loss_soft + loss_real
                     else:
                         loss_aux = loss_soft
@@ -273,6 +280,7 @@ def train_rl_pipeline():
                     loss_aux.backward()
                     torch.nn.utils.clip_grad_norm_(encoder.parameters(), grad_clip)
                     opt_encoder.step()
+                    did_update = True
 
                     # 自适应交替：追踪 E-step 损失
                     e_step_losses.append(loss_aux.item())
@@ -311,8 +319,7 @@ def train_rl_pipeline():
                     loss_td.backward()
                     torch.nn.utils.clip_grad_norm_(main_d3qn.parameters(), grad_clip)
                     opt_d3qn.step()
-
-                    # 更新 PER 优先级
+                    did_update = True
                     with torch.no_grad():
                         td_errors_np = (q_eval - target_q).abs().squeeze(1).cpu().numpy()
                     buffer.update_priorities(b_indices, td_errors_np)
@@ -329,9 +336,11 @@ def train_rl_pipeline():
         # ==========================================
         # 6. 周期性日志打印与模型保存
         # ==========================================
-        # 每个 episode 结束后推进学习率调度
-        scheduler_encoder.step()
-        scheduler_d3qn.step()
+        # 每个 episode 结束后推进学习率调度；仅在本 episode 有参数更新时才推进，
+        # 避免缓冲区未满的冷启动阶段触发 "scheduler before optimizer" 警告
+        if did_update:
+            scheduler_encoder.step()
+            scheduler_d3qn.step()
 
         # 实时将当前状态更新到进度条尾部，方便监控
         pbar.set_postfix({'Phase': phase_str, 'Steps': env.current_step, 'Epsilon': f"{epsilon:.3f}"})
