@@ -39,7 +39,7 @@ RL_MAX_EPISODES = 5000      # 总训练轮数
 RL_EPSILON_START = 1.0      # 初始探索率
 RL_EPSILON_END = 0.05       # 最低探索率
 RL_EPSILON_DECAY = 2000     # 探索率衰减控制（单位：episode）
-RL_GRAD_CLIP = 10.0         # 梯度裁剪最大范数
+RL_GRAD_CLIP = 10.0         # 梯度裁剪最大范数（DQN 场景 Q 值梯度量级较大，10.0 为常用经验值）
 
 # ==========================================
 # CD-CAT 环境超参数

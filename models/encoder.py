@@ -174,7 +174,10 @@ class StateEncoder(nn.Module):
     def get_hat_alpha(self, history_item_ids, history_scores, current_steps):
         """
         在线部署流程专用便捷方法 (8.2/8.7 节)
-        仅输出掌握概率 \alpha_hat_t，不需要完整的状态向量。
+        仅输出掌握概率 \\alpha_hat_t，不需要完整的状态向量。
+
+        注意：调用方需自行管理模型的 train/eval 状态。
+        推理时请在调用前执行 encoder.eval()。
         """
         with torch.no_grad():
             _, mastery_logits = self.forward(history_item_ids, history_scores, current_steps)
