@@ -1,17 +1,20 @@
+import logging
 import os
 import torch
 import numpy as np
 import pandas as pd
 from sklearn.metrics import roc_auc_score, mean_squared_error
-from sklearn.model_selection import train_test_split
 
 from models.ncdm import NCDM
 from models.encoder import StateEncoder
 from agent.d3qn import D3QN
 from env.cdcat_env import CDCATEnv
 
+logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
+logger = logging.getLogger(__name__)
 
-def load_models(device, data_dir, models_dir, max_steps):
+
+def load_models(device, data_dir, models_dir, max_steps, checkpoint_ep=5000):
     """统一加载所有预训练好的权重，并设置为严格的 eval 模式"""
     q_matrix = np.load(os.path.join(data_dir, 'q_matrix.npy'))
     num_items, num_skills = q_matrix.shape
@@ -21,7 +24,15 @@ def load_models(device, data_dir, models_dir, max_steps):
 
     # 1. 加载 NCDM
     ncdm = NCDM(num_students, num_items, num_skills).to(device)
-    ncdm.load_state_dict(torch.load(os.path.join(models_dir, 'ncdm_best.pth'), map_location=device))
+    ncdm_ckpt = os.path.join(models_dir, 'ncdm_best.pth')
+    try:
+        ncdm.load_state_dict(torch.load(ncdm_ckpt, map_location=device))
+    except FileNotFoundError:
+        logger.error("找不到 NCDM 权重文件: %s", ncdm_ckpt)
+        raise
+    except Exception as e:
+        logger.error("加载 NCDM 权重失败: %s", e)
+        raise
     ncdm.eval()
 
     # 获取冻结特征
@@ -30,14 +41,29 @@ def load_models(device, data_dir, models_dir, max_steps):
 
     # 2. 加载 Encoder
     encoder = StateEncoder(q_matrix_tensor, frozen_e_d, frozen_e_a, max_steps=max_steps).to(device)
-    # 请根据你实际训练保存的 epoch 数修改文件名，这里假设加载第 5000 轮
-    encoder.load_state_dict(torch.load(os.path.join(models_dir, 'encoder_ep5000.pth'), map_location=device))
+    encoder_ckpt = os.path.join(models_dir, f'encoder_ep{checkpoint_ep}.pth')
+    try:
+        encoder.load_state_dict(torch.load(encoder_ckpt, map_location=device))
+    except FileNotFoundError:
+        logger.error("找不到 Encoder 权重文件: %s", encoder_ckpt)
+        raise
+    except Exception as e:
+        logger.error("加载 Encoder 权重失败: %s", e)
+        raise
     encoder.eval()
 
     # 3. 加载 D3QN
-    state_dim = encoder.d2 + num_skills + 1
+    state_dim = encoder.state_dim
     d3qn = D3QN(state_dim, action_dim=num_items).to(device)
-    d3qn.load_state_dict(torch.load(os.path.join(models_dir, 'd3qn_ep5000.pth'), map_location=device))
+    d3qn_ckpt = os.path.join(models_dir, f'd3qn_ep{checkpoint_ep}.pth')
+    try:
+        d3qn.load_state_dict(torch.load(d3qn_ckpt, map_location=device))
+    except FileNotFoundError:
+        logger.error("找不到 D3QN 权重文件: %s", d3qn_ckpt)
+        raise
+    except Exception as e:
+        logger.error("加载 D3QN 权重失败: %s", e)
+        raise
     d3qn.eval()
 
     return ncdm, encoder, d3qn, q_matrix_tensor, mastery_probs_path
@@ -48,8 +74,8 @@ def evaluate_track_a(env, encoder, d3qn, num_simulated_students=500, device='cpu
     Track A: 模拟数据轨 (真实知识状态 \alpha^* 已知)
     评估指标: 均方误差 (MSE), 模式准确率 (PAR), 平均测试长度
     """
-    print("\n" + "=" * 50)
-    print(f"开始 Track A (模拟数据) 评估，共 {num_simulated_students} 名虚拟学生...")
+    logger.info("\n" + "=" * 50)
+    logger.info("开始 Track A (模拟数据) 评估，共 %d 名虚拟学生...", num_simulated_students)
 
     total_steps = 0
     total_mse = 0.0
@@ -83,9 +109,9 @@ def evaluate_track_a(env, encoder, d3qn, num_simulated_students=500, device='cpu
     avg_mse = total_mse / num_simulated_students
     par = par_hits / num_simulated_students
 
-    print(f"[Track A 结果] 平均测试长度: {avg_steps:.2f} 题")
-    print(f"[Track A 结果] 状态预测 MSE: {avg_mse:.4f}")
-    print(f"[Track A 结果] 模式准确率 (PAR): {par * 100:.2f}%")
+    logger.info("[Track A 结果] 平均测试长度: %.2f 题", avg_steps)
+    logger.info("[Track A 结果] 状态预测 MSE: %.4f", avg_mse)
+    logger.info("[Track A 结果] 模式准确率 (PAR): %.2f%%", par * 100)
 
 
 def evaluate_track_b(ncdm, encoder, d3qn, test_csv_path, q_matrix_tensor, max_steps, tau, device):
@@ -93,8 +119,8 @@ def evaluate_track_b(ncdm, encoder, d3qn, test_csv_path, q_matrix_tensor, max_st
     Track B: 真实数据轨 (利用可用池 70% 选题，在全局保留集 30% 上预测)
     评估指标: AUC, RMSE, 平均测试长度
     """
-    print("\n" + "=" * 50)
-    print("开始 Track B (真实数据) 评估...")
+    logger.info("\n" + "=" * 50)
+    logger.info("开始 Track B (真实数据) 评估...")
 
     test_df = pd.read_csv(test_csv_path)
     grouped = test_df.groupby('user_id')
@@ -189,33 +215,30 @@ def evaluate_track_b(ncdm, encoder, d3qn, test_csv_path, q_matrix_tensor, max_st
     rmse = np.sqrt(mean_squared_error(all_holdout_y_true, all_holdout_y_pred))
     avg_steps = total_steps / valid_students
 
-    print(f"[Track B 结果] 参与评估真实学生数: {valid_students}")
-    print(f"[Track B 结果] 平均测试长度: {avg_steps:.2f} 题")
-    print(f"[Track B 结果] 保留集作答预测 AUC: {auc:.4f}")
-    print(f"[Track B 结果] 保留集作答预测 RMSE: {rmse:.4f}")
+    logger.info("[Track B 结果] 参与评估真实学生数: %d", valid_students)
+    logger.info("[Track B 结果] 平均测试长度: %.2f 题", avg_steps)
+    logger.info("[Track B 结果] 保留集作答预测 AUC: %.4f", auc)
+    logger.info("[Track B 结果] 保留集作答预测 RMSE: %.4f", rmse)
 
 
 if __name__ == "__main__":
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"评估环境设备: {device}")
+    from config import DATA_DIR, MODELS_DIR, EVAL_MAX_STEPS, EVAL_TAU, EVAL_NUM_SIMULATED, EVAL_CHECKPOINT_EP
 
-    # 路径配置 (与你的 Windows 11 工程结构保持一致)
-    DATA_DIR = r"C:\Users\95215\PycharmProjects\CD_CAT_RL\data\processed"
-    MODELS_DIR = r"C:\Users\95215\PycharmProjects\CD_CAT_RL\models\saved"
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    logger.info("评估环境设备: %s", device)
+
     TEST_CSV = os.path.join(DATA_DIR, 'test.csv')
 
-    # 全局参数
-    MAX_STEPS = 50
-    TAU = 0.3  # 诊断终止的不确定性阈值
-
     # 统一加载权重
-    print("正在加载 NCDM、Encoder 和 D3QN 的网络权重...")
-    ncdm, encoder, d3qn, q_mat, m_probs_path = load_models(device, DATA_DIR, MODELS_DIR, MAX_STEPS)
+    logger.info("正在加载 NCDM、Encoder 和 D3QN 的网络权重...")
+    ncdm, encoder, d3qn, q_mat, m_probs_path = load_models(
+        device, DATA_DIR, MODELS_DIR, EVAL_MAX_STEPS, checkpoint_ep=EVAL_CHECKPOINT_EP
+    )
 
     # 初始化 Track A 所需的 Env
     env = CDCATEnv(ncdm, encoder, q_mat.cpu().numpy(), m_probs_path,
-                   max_steps=MAX_STEPS, tau=TAU, device=device)
+                   max_steps=EVAL_MAX_STEPS, tau=EVAL_TAU, device=device)
 
     # 运行双轨评估
-    evaluate_track_a(env, encoder, d3qn, num_simulated_students=500, device=device)
-    evaluate_track_b(ncdm, encoder, d3qn, TEST_CSV, q_mat, MAX_STEPS, TAU, device=device)
+    evaluate_track_a(env, encoder, d3qn, num_simulated_students=EVAL_NUM_SIMULATED, device=device)
+    evaluate_track_b(ncdm, encoder, d3qn, TEST_CSV, q_mat, EVAL_MAX_STEPS, EVAL_TAU, device=device)

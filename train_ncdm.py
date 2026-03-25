@@ -1,3 +1,4 @@
+import logging
 import os
 import numpy as np
 import pandas as pd
@@ -7,6 +8,9 @@ import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 from sklearn.metrics import roc_auc_score, mean_squared_error
 from models.ncdm import NCDM  # 引入我们刚才写的模型
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
+logger = logging.getLogger(__name__)
 
 
 # 1. 定义 PyTorch Dataset
@@ -47,7 +51,7 @@ def evaluate(model, dataloader, q_matrix, device):
 # 3. 主训练循环
 def train_ncdm_pipeline(data_dir, save_dir, batch_size=256, epochs=10, lr=0.002):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"当前使用设备: {device}")
+    logger.info("当前使用设备: %s", device)
 
     # 加载数据和 Q 矩阵
     train_dataset = ASSISTmentsDataset(os.path.join(data_dir, 'train.csv'))
@@ -67,7 +71,7 @@ def train_ncdm_pipeline(data_dir, save_dir, batch_size=256, epochs=10, lr=0.002)
     all_users = set(train_dataset.users.numpy()) | set(valid_dataset.users.numpy())
     num_students = max(all_users) + 1
 
-    print(f"初始化 NCDM: 学生数={num_students}, 题目数={num_items}, 知识点数={num_skills}")
+    logger.info("初始化 NCDM: 学生数=%d, 题目数=%d, 知识点数=%d", num_students, num_items, num_skills)
     model = NCDM(num_students, num_items, num_skills).to(device)
 
     # 损失函数与优化器 (严格的二元交叉熵)
@@ -76,7 +80,7 @@ def train_ncdm_pipeline(data_dir, save_dir, batch_size=256, epochs=10, lr=0.002)
 
     best_auc = 0.0
 
-    print("开始训练 NCDM 教师模型...")
+    logger.info("开始训练 NCDM 教师模型...")
     for epoch in range(epochs):
         model.train()
         total_loss = 0.0
@@ -94,22 +98,32 @@ def train_ncdm_pipeline(data_dir, save_dir, batch_size=256, epochs=10, lr=0.002)
 
         # 验证集评估
         val_auc, val_rmse = evaluate(model, valid_loader, q_matrix_tensor, device)
-        print(
-            f"Epoch {epoch + 1}/{epochs} | Loss: {total_loss / len(train_loader):.4f} | Val AUC: {val_auc:.4f} | Val RMSE: {val_rmse:.4f}")
+        logger.info(
+            "Epoch %d/%d | Loss: %.4f | Val AUC: %.4f | Val RMSE: %.4f",
+            epoch + 1, epochs, total_loss / len(train_loader), val_auc, val_rmse
+        )
 
         # 保存最佳模型
         if val_auc > best_auc:
             best_auc = val_auc
             os.makedirs(save_dir, exist_ok=True)
             torch.save(model.state_dict(), os.path.join(save_dir, 'ncdm_best.pth'))
-            print("  --> 发现更优模型，已保存。")
+            logger.info("  --> 发现更优模型，已保存。")
 
     # ==========================================
     # 关键步骤：提取并保存训练集学生的先验知识分布
     # 对应框架 4.5 节：推断训练集学生的知识状态
     # ==========================================
-    print("\n训练结束。开始提取训练集学生的知识掌握经验分布...")
-    model.load_state_dict(torch.load(os.path.join(save_dir, 'ncdm_best.pth')))
+    logger.info("\n训练结束。开始提取训练集学生的知识掌握经验分布...")
+    checkpoint_path = os.path.join(save_dir, 'ncdm_best.pth')
+    try:
+        model.load_state_dict(torch.load(checkpoint_path, map_location=device))
+    except FileNotFoundError:
+        logger.error("找不到最优模型文件: %s", checkpoint_path)
+        raise
+    except Exception as e:
+        logger.error("加载模型权重失败: %s", e)
+        raise
     model.eval()
 
     with torch.no_grad():
@@ -120,12 +134,12 @@ def train_ncdm_pipeline(data_dir, save_dir, batch_size=256, epochs=10, lr=0.002)
 
     save_path = os.path.join(data_dir, 'train_student_mastery_probs.npy')
     np.save(save_path, mastery_probs)
-    print(f"经验分布已保存至: {save_path} (Shape: {mastery_probs.shape})")
-    print("阶段一圆满完成！")
+    logger.info("经验分布已保存至: %s (Shape: %s)", save_path, mastery_probs.shape)
+    logger.info("阶段一圆满完成！")
 
 
 if __name__ == "__main__":
-    DATA_DIR = r"C:\Users\95215\PycharmProjects\CD_CAT_RL\data\processed"
-    SAVE_DIR = r"C:\Users\95215\PycharmProjects\CD_CAT_RL\models\saved"
+    from config import DATA_DIR, MODELS_DIR, NCDM_BATCH_SIZE, NCDM_EPOCHS, NCDM_LR
 
-    train_ncdm_pipeline(data_dir=DATA_DIR, save_dir=SAVE_DIR)
+    train_ncdm_pipeline(data_dir=DATA_DIR, save_dir=MODELS_DIR,
+                        batch_size=NCDM_BATCH_SIZE, epochs=NCDM_EPOCHS, lr=NCDM_LR)

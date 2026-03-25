@@ -1,3 +1,4 @@
+import logging
 import os
 import torch
 import torch.nn as nn
@@ -13,6 +14,10 @@ from models.encoder import StateEncoder
 from agent.d3qn import D3QN
 from agent.replay_buffer import ReplayBuffer
 from env.cdcat_env import CDCATEnv
+import config as cfg
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
+logger = logging.getLogger(__name__)
 
 
 def train_rl_pipeline():
@@ -20,25 +25,25 @@ def train_rl_pipeline():
     # 1. 基础配置与路径设置
     # ==========================================
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"当前使用的计算设备是: {device}")
+    logger.info("当前使用的计算设备是: %s", device)
 
-    data_dir = r"C:\Users\95215\PycharmProjects\CD_CAT_RL\data\processed"
-    models_dir = r"C:\Users\95215\PycharmProjects\CD_CAT_RL\models\saved"
+    data_dir = cfg.DATA_DIR
+    models_dir = cfg.MODELS_DIR
     mastery_probs_path = os.path.join(data_dir, 'train_student_mastery_probs.npy')
 
-    # 超参数设置
-    max_steps = 50  # H_max
-    batch_size = 128
-    gamma = 0.99  # 奖励折扣因子
-    lr_encoder = 1e-4  # 编码器学习率
-    lr_d3qn = 1e-4  # 策略网络学习率
-    buffer_capacity = 50000
-    T_update = 500  # 目标网络同步频率 (步数)
-    N_alt = 10  # 交替优化频率：每 10 个 Episode 切换一次阶段
-    max_episodes = 5000  # 总训练轮数
-    epsilon_start = 1.0  # 初始探索率
-    epsilon_end = 0.05  # 最低探索率
-    epsilon_decay = 2000  # 探索率衰减控制
+    # 超参数设置（来自 config.py）
+    max_steps = cfg.RL_MAX_STEPS
+    batch_size = cfg.RL_BATCH_SIZE
+    gamma = cfg.RL_GAMMA
+    lr_encoder = cfg.RL_LR_ENCODER
+    lr_d3qn = cfg.RL_LR_D3QN
+    buffer_capacity = cfg.RL_BUFFER_CAPACITY
+    T_update = cfg.RL_T_UPDATE
+    N_alt = cfg.RL_N_ALT
+    max_episodes = cfg.RL_MAX_EPISODES
+    epsilon_start = cfg.RL_EPSILON_START
+    epsilon_end = cfg.RL_EPSILON_END
+    epsilon_decay = cfg.RL_EPSILON_DECAY
 
     # ==========================================
     # 2. 加载冻结的 NCDM 教师模型
@@ -54,7 +59,15 @@ def train_rl_pipeline():
     num_students = max(all_users) + 1
 
     ncdm = NCDM(num_students, num_items, num_skills).to(device)
-    ncdm.load_state_dict(torch.load(os.path.join(models_dir, 'ncdm_best.pth'), map_location=device))
+    ncdm_ckpt = os.path.join(models_dir, 'ncdm_best.pth')
+    try:
+        ncdm.load_state_dict(torch.load(ncdm_ckpt, map_location=device))
+    except FileNotFoundError:
+        logger.error("找不到 NCDM 权重文件: %s", ncdm_ckpt)
+        raise
+    except Exception as e:
+        logger.error("加载 NCDM 权重失败: %s", e)
+        raise
     ncdm.eval()  # 严格冻结教师模型
     for param in ncdm.parameters():
         param.requires_grad = False
@@ -74,7 +87,7 @@ def train_rl_pipeline():
                    mastery_probs_path=mastery_probs_path, max_steps=max_steps, device=device)
 
     # D3QN 策略网络 (主网络和目标网络)
-    state_dim = encoder.d2 + num_skills + 1
+    state_dim = encoder.state_dim
     action_dim = num_items
     main_d3qn = D3QN(state_dim, action_dim).to(device)
     target_d3qn = D3QN(state_dim, action_dim).to(device)
@@ -94,7 +107,7 @@ def train_rl_pipeline():
     # 4. 主训练循环 (交替优化范式)
     # ==========================================
     total_steps = 0
-    print("开始强化学习范式训练...")
+    logger.info("开始强化学习范式训练...")
 
     # 使用 tqdm 包裹训练循环，创建可视化进度条
     pbar = tqdm(range(1, max_episodes + 1), desc="RL Training")
@@ -225,10 +238,9 @@ def train_rl_pipeline():
             os.makedirs(models_dir, exist_ok=True)
             torch.save(encoder.state_dict(), os.path.join(models_dir, f'encoder_ep{episode}.pth'))
             torch.save(main_d3qn.state_dict(), os.path.join(models_dir, f'd3qn_ep{episode}.pth'))
-            # 使用 tqdm.write 避免破坏进度条排版
             tqdm.write(f"--> [Checkpoint] 成功保存 Episode {episode} 的模型权重！")
 
-    print("强化学习范式训练圆满结束！")
+    logger.info("强化学习范式训练圆满结束！")
 
 
 if __name__ == "__main__":

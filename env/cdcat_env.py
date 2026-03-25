@@ -1,7 +1,5 @@
 import numpy as np
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
 
 
 class CDCATEnv:
@@ -81,8 +79,8 @@ class CDCATEnv:
             s_t, mastery_logits = self.encoder(padded_items, padded_scores, current_steps_tensor)
             hat_alpha_t = torch.sigmoid(mastery_logits).squeeze(0)  # [num_skills]
 
-        max_ent, mean_ent = self._calculate_entropy(hat_alpha_t)
-        return s_t.squeeze(0), hat_alpha_t, max_ent, mean_ent
+        max_entropy, mean_ent = self._calculate_entropy(hat_alpha_t)
+        return s_t.squeeze(0), hat_alpha_t, max_entropy, mean_ent
 
     def reset(self):
         """
@@ -136,36 +134,37 @@ class CDCATEnv:
         self.available_items.remove(action_item_id)
         self.current_step += 1
 
-        s_next, hat_alpha_next, max_ent, mean_ent_next = self._get_current_state_and_entropy()
+        s_next, hat_alpha_next, max_entropy, mean_ent_next = self._get_current_state_and_entropy()
 
         # ==========================================
         # 3. 计算混合奖励 -> 框架 2.4 节
         # ==========================================
-        delta_H_t = self.current_mean_entropy - mean_ent_next
+        entropy_reduction = self.current_mean_entropy - mean_ent_next
         self.current_mean_entropy = mean_ent_next  # 更新状态
 
         # 检查终止条件 (框架 2.5 节)
         done = False
         reward = 0.0
 
-        if max_ent < self.tau:
+        if max_entropy < self.tau:
+            # 熵达标，诊断成功提前终止，给予正奖励激励智能体尽早完成
             done = True
-            reward = 0.0  # 达标，终止，奖励为 0
+            reward = 1.0
         elif self.current_step >= self.max_steps:
             done = True
             # 达到最大步数依然未达标，给予最后一次惩罚
-            reward = min(-1.0 + self.beta * delta_H_t, 0.0)
+            reward = min(-1.0 + self.beta * entropy_reduction, 0.0)
         else:
             done = False
             # 继续测试，硬截断防止刷正奖励
-            reward = min(-1.0 + self.beta * delta_H_t, 0.0)
+            reward = min(-1.0 + self.beta * entropy_reduction, 0.0)
 
         info = {
             'y_t': y_t,
             'true_alpha': self.alpha_star.cpu().numpy(),
             'pred_alpha': hat_alpha_next.cpu().numpy(),
-            'delta_H_t': delta_H_t,
-            'max_ent': max_ent
+            'entropy_reduction': entropy_reduction,
+            'max_entropy': max_entropy
         }
 
         return s_next, reward, done, info

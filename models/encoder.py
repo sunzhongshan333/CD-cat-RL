@@ -1,6 +1,5 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 
 class StateEncoder(nn.Module):
@@ -61,6 +60,11 @@ class StateEncoder(nn.Module):
         # 输入 h_t (d2) -> 输出各知识点的掌握 Logit -> 后续加 Sigmoid 为概率
         # 对应框架 5.4 节：在线毫秒级推断的核心路径
         self.mapping_head = nn.Linear(d2, num_skills)
+
+    @property
+    def state_dim(self):
+        """返回编码器输出的完整状态向量维度: d2 + num_skills + 1"""
+        return self.d2 + self.num_skills + 1
 
     def forward(self, history_item_ids, history_scores, current_steps):
         """
@@ -161,6 +165,9 @@ class StateEncoder(nn.Module):
         # s_t 维度应当是: d2 + num_skills + 1
         # shape: [batch_size, d2 + num_skills + 1]
         final_state = torch.cat([h_t, hat_alpha_t, norm_timesteps], dim=1)
+        assert final_state.shape[1] == self.state_dim, (
+            f"状态维度不匹配：期望 {self.state_dim}，实际 {final_state.shape[1]}"
+        )
 
         return final_state, mastery_logits
 
