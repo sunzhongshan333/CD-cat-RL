@@ -5,7 +5,7 @@ import config as cfg
 
 class CDCATEnv:
     def __init__(self, ncdm_model, encoder_model, q_matrix, mastery_probs_path,
-                 max_steps=50, tau=None, beta=None, epsilon=None, device='cpu'):
+                 max_steps=50, tau=None, beta=None, epsilon=None, step_cost=None, device='cpu'):
         """
         阶段三/四：CD-CAT 强化学习交互环境 (Gymnasium-style)
         """
@@ -23,18 +23,21 @@ class CDCATEnv:
         self.tau = tau if tau is not None else cfg.CDCAT_TAU
         self.beta = beta if beta is not None else cfg.CDCAT_BETA
         self.epsilon = epsilon if epsilon is not None else cfg.CDCAT_EPSILON
+        self.step_cost = step_cost if step_cost is not None else cfg.CDCAT_STEP_COST
+        self.success_reward = cfg.CDCAT_SUCCESS_REWARD
 
         # 加载阶段一生成的训练集学生先验经验分布 (Shape: [num_train_users, K])
         self.empirical_mastery_probs = np.load(mastery_probs_path)
         self.num_empirical_students = self.empirical_mastery_probs.shape[0]
 
         # 内部状态变量
-        self.alpha_star = None  # 模拟学生的真实知识状态
+        self.alpha_star = None  # 模拟学生的连续知识掌握概率（不再硬二值化）
         self.history_item_ids = []  # 答题历史 ID
         self.history_scores = []  # 答题历史 结果
         self.available_items = set(range(self.num_items))  # 剩余可选题目池
         self.current_step = 0
         self.current_mean_entropy = None  # \bar{H}_t
+        self.current_hat_alpha = None     # 编码器最新输出的掌握概率，用于信息引导探索
 
         # 预分配热路径张量，避免每步重复申请 GPU 内存
         self._padded_items = torch.full((1, self.max_steps), -1, dtype=torch.long, device=self.device)
@@ -44,6 +47,9 @@ class CDCATEnv:
     def _sample_simulated_student(self):
         """
         严格对应框架 7.2 节：鲁棒经验采样生成器
+
+        改进：保留连续掌握概率（不再做伯努利硬二值化），
+        消除训练与真实学生之间的 sim-to-real 分布差距。
         """
         if np.random.rand() < self.epsilon:
             # \epsilon 概率退化为全空间均匀采样，保证探索多样性
@@ -53,8 +59,8 @@ class CDCATEnv:
             idx = np.random.randint(0, self.num_empirical_students)
             probs = self.empirical_mastery_probs[idx]
 
-        # 独立伯努利采样生成真实的二值知识状态 \alpha^* \in {0,1}^K
-        alpha_star = np.random.binomial(1, probs).astype(np.float32)
+        # 直接保留连续掌握概率，不做硬二值化
+        alpha_star = probs.astype(np.float32)
         return torch.tensor(alpha_star).to(self.device)
 
     def _calculate_entropy(self, mastery_probs):
@@ -96,6 +102,7 @@ class CDCATEnv:
             self.encoder.train()
 
         max_entropy, mean_ent = self._calculate_entropy(hat_alpha_t)
+        self.current_hat_alpha = hat_alpha_t  # 供信息引导探索使用
         return s_t.squeeze(0), hat_alpha_t, max_entropy, mean_ent
 
     def reset(self):
@@ -165,12 +172,14 @@ class CDCATEnv:
         if max_entropy < self.tau:
             # 熵达标，诊断成功提前终止，给予正奖励激励智能体尽早完成
             done = True
-            reward = 1.0
+            reward = self.success_reward
         else:
-            # 未达标（含步数耗尽）：硬截断防止刷正奖励
+            # 塑形奖励：每步熵减奖励 - 固定步骤代价
+            # 去掉 min(..., 0.0) 硬截断，让熵减带来的正信号可以传递，
+            # 解决奖励稀疏问题并改善 credit assignment
             if self.current_step >= self.max_steps:
                 done = True
-            reward = min(-1.0 + self.beta * entropy_reduction, 0.0)
+            reward = self.beta * entropy_reduction - self.step_cost
 
         info = {
             'y_t': y_t,

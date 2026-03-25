@@ -6,18 +6,32 @@ import torch.nn as nn
 import torch.optim as optim
 import numpy as np
 import pandas as pd
+from collections import deque
 from tqdm import tqdm  # 新增进度条包
 
 # 导入我们的模块
 from models.ncdm import NCDM
 from models.encoder import StateEncoder
 from agent.d3qn import D3QN
-from agent.replay_buffer import ReplayBuffer
+from agent.replay_buffer import PrioritizedReplayBuffer
 from env.cdcat_env import CDCATEnv
 import config as cfg
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 logger = logging.getLogger(__name__)
+
+
+def _check_plateau(loss_window, threshold):
+    """
+    检测损失窗口是否进入平台期。
+    将窗口等分为前后两段，若后段均值相比前段均值的改善量低于 threshold，
+    则认为当前阶段已停止有效优化。
+    """
+    if len(loss_window) < loss_window.maxlen:
+        return False
+    losses = list(loss_window)
+    half = len(losses) // 2
+    return (np.mean(losses[:half]) - np.mean(losses[half:])) < threshold
 
 
 def train_rl_pipeline():
@@ -46,8 +60,7 @@ def train_rl_pipeline():
     lr_encoder = cfg.RL_LR_ENCODER
     lr_d3qn = cfg.RL_LR_D3QN
     buffer_capacity = cfg.RL_BUFFER_CAPACITY
-    T_update = cfg.RL_T_UPDATE
-    N_alt = cfg.RL_N_ALT
+    polyak_tau = cfg.RL_POLYAK_TAU
     max_episodes = cfg.RL_MAX_EPISODES
     epsilon_start = cfg.RL_EPSILON_START
     epsilon_end = cfg.RL_EPSILON_END
@@ -106,7 +119,6 @@ def train_rl_pipeline():
     opt_encoder = optim.Adam(encoder.parameters(), lr=lr_encoder)
     opt_d3qn = optim.Adam(main_d3qn.parameters(), lr=lr_d3qn)
     bce_loss = nn.BCEWithLogitsLoss()  # 内置 log-sum-exp trick，数值更稳定
-    mse_loss = nn.MSELoss()
 
     # 余弦退火学习率调度：从 lr 衰减到接近 0，兼顾前期快速收敛与后期精细调整
     scheduler_encoder = optim.lr_scheduler.CosineAnnealingLR(
@@ -114,21 +126,33 @@ def train_rl_pipeline():
     scheduler_d3qn = optim.lr_scheduler.CosineAnnealingLR(
         opt_d3qn, T_max=max_episodes, eta_min=lr_d3qn * 0.01)
 
-    # 回放池
-    buffer = ReplayBuffer(buffer_capacity, max_steps, device)
+    # 回放池（优先经验回放）
+    buffer = PrioritizedReplayBuffer(
+        buffer_capacity, max_steps, device,
+        alpha=cfg.RL_PER_ALPHA,
+        beta_start=cfg.RL_PER_BETA_START,
+        beta_frames=cfg.RL_PER_BETA_FRAMES,
+        eps=cfg.RL_PER_EPS,
+    )
 
     # ==========================================
-    # 4. 主训练循环 (交替优化范式)
+    # 4. 主训练循环 (自适应交替优化范式)
     # ==========================================
     total_steps = 0
     logger.info("开始强化学习范式训练...")
+
+    # --- 自适应交替优化状态 ---
+    current_phase = 'e_step'         # 从 E-step 开始
+    phase_opt_steps = 0              # 当前阶段已完成的优化步数
+    e_step_losses = deque(maxlen=cfg.RL_LOSS_PLATEAU_WINDOW)
+    q_step_losses = deque(maxlen=cfg.RL_LOSS_PLATEAU_WINDOW)
 
     # 使用 tqdm 包裹训练循环，创建可视化进度条
     pbar = tqdm(range(1, max_episodes + 1), desc="RL Training")
 
     for episode in pbar:
-        # 决定当前是 E-step 还是 Q-step (严格执行框架 7.3)
-        is_e_step = ((episode - 1) // N_alt) % 2 == 0
+        # 本 episode 所属阶段（上一步优化后可能已切换，这里生效）
+        is_e_step = (current_phase == 'e_step')
 
         if is_e_step:
             encoder.train()
@@ -150,11 +174,17 @@ def train_rl_pipeline():
         while not done:
             mask_t = env.get_action_mask()
 
-            # --- 动作选择 (epsilon-greedy) ---
+            # --- 动作选择（信息引导探索代替纯随机 ε-greedy）---
             if np.random.rand() < epsilon:
-                # 随机选择一个有效的题目
-                valid_actions = torch.where(mask_t)[0].cpu().numpy()
-                action = np.random.choice(valid_actions)
+                # 信息引导探索：优先选覆盖当前高熵知识点的题目
+                with torch.no_grad():
+                    hat_alpha = env.current_hat_alpha          # [K]
+                    p = torch.clamp(hat_alpha, 1e-7, 1.0 - 1e-7)
+                    skill_entropy = -p * torch.log(p) - (1 - p) * torch.log(1 - p)  # [K]
+                    valid_indices = torch.where(mask_t)[0]              # [num_valid]
+                    valid_q = env.q_matrix[valid_indices]               # [num_valid, K]
+                    item_scores = (valid_q * skill_entropy.unsqueeze(0)).sum(dim=1)  # [num_valid]
+                    action = valid_indices[item_scores.argmax().item()].item()
             else:
                 # D3QN 贪心选择
                 with torch.no_grad():
@@ -162,7 +192,6 @@ def train_rl_pipeline():
                     action = q_values.argmax(dim=1).item()
 
             # --- 执行动作，获取转移 ---
-            # 记录执行前的状态变量供回放池使用
             h_items_t = list(env.history_item_ids)
             h_scores_t = list(env.history_scores)
             step_t = env.current_step
@@ -172,10 +201,14 @@ def train_rl_pipeline():
             mask_next = env.get_action_mask()
             total_steps += 1
 
-            # --- 存入延迟编码回放池 ---
+            # --- 存入优先经验回放池 ---
             buffer.push(h_items_t, h_scores_t, step_t, action, reward,
                         env.history_item_ids, env.history_scores, env.current_step,
                         mask_t, mask_next, done, true_alpha_t)
+
+            # --- Polyak 软更新目标网络（每步执行，平滑追踪主网络）---
+            for param, target_param in zip(main_d3qn.parameters(), target_d3qn.parameters()):
+                target_param.data.mul_(1.0 - polyak_tau).add_(polyak_tau * param.data)
 
             s_t = s_next
 
@@ -183,10 +216,11 @@ def train_rl_pipeline():
             # 5. 核心优化步骤 (Batch 训练)
             # ==========================================
             if buffer.is_ready(batch_size):
-                # 采样 Batch
+                # 采样 Batch（含 PER 下标和 IS 权重）
                 b_h_items, b_h_scores, b_steps, b_actions, b_rewards, \
                     b_next_h_items, b_next_h_scores, b_next_steps, \
-                    b_masks, b_next_masks, b_dones, b_true_alphas = buffer.sample(batch_size)
+                    b_masks, b_next_masks, b_dones, b_true_alphas, \
+                    b_indices, b_is_weights = buffer.sample(batch_size)
 
                 if is_e_step:
                     # ------------------------------------------
@@ -198,7 +232,7 @@ def train_rl_pipeline():
                     s_batch, mastery_logits = encoder(b_h_items, b_h_scores, b_steps)
                     hat_alpha = torch.sigmoid(mastery_logits)  # [batch, K]
 
-                    # 2. 构建学生预测的 interaction logits（未答题目上计算）
+                    # 2. 构建学生预测的 interaction logits
                     interaction_pred = hat_alpha.unsqueeze(1) * q_matrix_tensor.unsqueeze(0) * frozen_e_a.unsqueeze(
                         0) - frozen_e_d.unsqueeze(0)
                     pred_logits = ncdm.interaction_mlp(interaction_pred).squeeze(-1)  # [batch, num_items]
@@ -207,14 +241,47 @@ def train_rl_pipeline():
                     with torch.no_grad():
                         interaction_teacher = b_true_alphas.unsqueeze(1) * q_matrix_tensor.unsqueeze(
                             0) * frozen_e_a.unsqueeze(0) - frozen_e_d.unsqueeze(0)
-                        # 教师输出加 sigmoid，作为 [0,1] 软标签供 BCEWithLogitsLoss 使用
                         target_y = torch.sigmoid(ncdm.interaction_mlp(interaction_teacher).squeeze(-1))
 
-                    # 4. 计算辅助 BCE 损失 (BCEWithLogitsLoss 接收 logit 输入，数值稳定)
-                    loss_aux = bce_loss(pred_logits[b_masks], target_y[b_masks])
+                    # 4a. 未答题目上的软标签损失
+                    loss_soft = bce_loss(pred_logits[b_masks], target_y[b_masks])
+
+                    # 4b. 已答题目上的真实标签损失（自洽性约束）
+                    # scatter 将稀疏历史 (item_id, score) 展开为 [batch, num_items+1] 密集矩阵：
+                    # padding 位被重定向到哑列 num_items（该列最终被截断丢弃），
+                    # 避免用 index 0 覆盖真实的第 0 题数据。
+                    valid_h_mask = (b_h_items != -1)                            # [B, T]
+                    safe_h_items = torch.where(
+                        valid_h_mask, b_h_items,
+                        torch.full_like(b_h_items, num_items))                  # padding → 哑列
+                    answered_big = torch.zeros(
+                        batch_size, num_items + 1, dtype=torch.bool, device=device)
+                    answered_big.scatter_(1, safe_h_items, valid_h_mask)
+                    answered_mask = answered_big[:, :num_items]                 # [B, num_items]
+
+                    real_labels_big = torch.zeros(batch_size, num_items + 1, device=device)
+                    real_labels_big.scatter_(1, safe_h_items,
+                                             b_h_scores.clamp(min=0).float())
+                    real_labels = real_labels_big[:, :num_items]                # [B, num_items]
+
+                    if answered_mask.any():
+                        loss_real = bce_loss(pred_logits[answered_mask], real_labels[answered_mask])
+                        loss_aux = loss_soft + loss_real
+                    else:
+                        loss_aux = loss_soft
+
                     loss_aux.backward()
                     torch.nn.utils.clip_grad_norm_(encoder.parameters(), grad_clip)
                     opt_encoder.step()
+
+                    # 自适应交替：追踪 E-step 损失
+                    e_step_losses.append(loss_aux.item())
+                    phase_opt_steps += 1
+                    if (phase_opt_steps >= cfg.RL_LOSS_PLATEAU_MIN_STEPS and
+                            _check_plateau(e_step_losses, cfg.RL_LOSS_PLATEAU_THRESHOLD)):
+                        current_phase = 'q_step'
+                        phase_opt_steps = 0
+                        e_step_losses.clear()
 
                 else:
                     # ------------------------------------------
@@ -223,8 +290,6 @@ def train_rl_pipeline():
                     opt_d3qn.zero_grad()
 
                     with torch.no_grad():
-                        # 将当前状态与下一状态拼接，一次 encoder forward 完成两次编码
-                        # 节省约 30~40% 的 encoder 推断时间（LayerNorm 等算子可并行）
                         all_h_items  = torch.cat([b_h_items,       b_next_h_items],  dim=0)
                         all_h_scores = torch.cat([b_h_scores,      b_next_h_scores], dim=0)
                         all_steps    = torch.cat([b_steps,         b_next_steps],    dim=0)
@@ -240,14 +305,26 @@ def train_rl_pipeline():
                     # 计算当前评估的 Q 值
                     q_eval = main_d3qn(s_batch, b_masks).gather(1, b_actions)
 
-                    loss_td = mse_loss(q_eval, target_q)
+                    # IS 权重加权 TD 损失（PER 无偏修正）
+                    td_errors_sq = (q_eval - target_q) ** 2        # [batch, 1]
+                    loss_td = (b_is_weights * td_errors_sq).mean()
                     loss_td.backward()
                     torch.nn.utils.clip_grad_norm_(main_d3qn.parameters(), grad_clip)
                     opt_d3qn.step()
 
-            # --- 目标网络同步 ---
-            if total_steps % T_update == 0:
-                target_d3qn.load_state_dict(main_d3qn.state_dict())
+                    # 更新 PER 优先级
+                    with torch.no_grad():
+                        td_errors_np = (q_eval - target_q).abs().squeeze(1).cpu().numpy()
+                    buffer.update_priorities(b_indices, td_errors_np)
+
+                    # 自适应交替：追踪 Q-step 损失
+                    q_step_losses.append(loss_td.item())
+                    phase_opt_steps += 1
+                    if (phase_opt_steps >= cfg.RL_LOSS_PLATEAU_MIN_STEPS and
+                            _check_plateau(q_step_losses, cfg.RL_LOSS_PLATEAU_THRESHOLD)):
+                        current_phase = 'e_step'
+                        phase_opt_steps = 0
+                        q_step_losses.clear()
 
         # ==========================================
         # 6. 周期性日志打印与模型保存

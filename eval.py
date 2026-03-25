@@ -139,17 +139,20 @@ def evaluate_track_a(env, d3qn, num_simulated_students=500, device='cpu',
 
         pred_alpha = info['pred_alpha']
 
-        # MSE / MAE
+        # alpha_star 现为连续概率，需二值化（阈值 0.5）后再比较
+        true_alpha_binary = (true_alpha > 0.5).astype(np.float32)
+
+        # MSE / MAE（用连续概率计算，更能反映诊断精度）
         per_student_mse.append(float(np.mean((true_alpha - pred_alpha) ** 2)))
         per_student_mae.append(float(np.mean(np.abs(true_alpha - pred_alpha))))
 
         # PAR (所有知识点完全吻合才算 1 分)
         pred_binary = (pred_alpha > 0.5).astype(np.float32)
-        if np.array_equal(true_alpha.astype(np.float32), pred_binary):
+        if np.array_equal(true_alpha_binary, pred_binary):
             par_hits += 1
 
         # 累计展平标签，供全局二分类指标计算
-        all_true_flat.extend(true_alpha.astype(int).tolist())
+        all_true_flat.extend(true_alpha_binary.astype(int).tolist())
         all_pred_flat.extend(pred_binary.astype(int).tolist())
 
         # MSE@K 曲线累计
