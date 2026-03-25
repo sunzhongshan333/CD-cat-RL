@@ -51,7 +51,7 @@ CDCAT_EPSILON = 0.1         # 经验分布退化为均匀采样的概率
 # ==========================================
 # 评估超参数
 # ==========================================
-EVAL_MAX_STEPS = 50
+EVAL_MAX_STEPS = RL_MAX_STEPS   # 与训练保持一致，避免手动同步
 EVAL_TAU = CDCAT_TAU        # 与训练环境保持一致
 EVAL_NUM_SIMULATED = 500    # Track A 虚拟学生数量
 EVAL_CHECKPOINT_EP = 5000   # 加载第几轮的 checkpoint 权重

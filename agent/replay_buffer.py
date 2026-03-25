@@ -52,10 +52,10 @@ class ReplayBuffer:
         # ==========================================
         # 核心逻辑：动态 Padding，生成变长历史的 Tensor 表示
         # ==========================================
-        pad_h_items = torch.full((batch_size, self.max_steps), -1, dtype=torch.long)
-        pad_h_scores = torch.full((batch_size, self.max_steps), -1, dtype=torch.long)
-        pad_next_h_items = torch.full((batch_size, self.max_steps), -1, dtype=torch.long)
-        pad_next_h_scores = torch.full((batch_size, self.max_steps), -1, dtype=torch.long)
+        pad_h_items = torch.full((batch_size, self.max_steps), -1, dtype=torch.long, device=self.device)
+        pad_h_scores = torch.full((batch_size, self.max_steps), -1, dtype=torch.long, device=self.device)
+        pad_next_h_items = torch.full((batch_size, self.max_steps), -1, dtype=torch.long, device=self.device)
+        pad_next_h_scores = torch.full((batch_size, self.max_steps), -1, dtype=torch.long, device=self.device)
 
         for i in range(batch_size):
             len_t = len(h_items_batch[i])
@@ -79,9 +79,9 @@ class ReplayBuffer:
         mask_tensor = torch.stack(mask_batch).to(self.device)
         next_mask_tensor = torch.stack(next_mask_batch).to(self.device)
 
-        return (pad_h_items.to(self.device), pad_h_scores.to(self.device), step_tensor,
+        return (pad_h_items, pad_h_scores, step_tensor,
                 action_tensor, reward_tensor,
-                pad_next_h_items.to(self.device), pad_next_h_scores.to(self.device), next_step_tensor,
+                pad_next_h_items, pad_next_h_scores, next_step_tensor,
                 mask_tensor, next_mask_tensor, done_tensor, true_alpha_tensor)
 
     def __len__(self):

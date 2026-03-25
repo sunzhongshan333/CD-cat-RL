@@ -78,7 +78,7 @@ def load_models(device, data_dir, models_dir, max_steps, checkpoint_ep=5000):
     return ncdm, encoder, d3qn, q_matrix_tensor, mastery_probs_path
 
 
-def evaluate_track_a(env, encoder, d3qn, num_simulated_students=500, device='cpu',
+def evaluate_track_a(env, d3qn, num_simulated_students=500, device='cpu',
                      curve_save_path=None):
     """
     Track A: 模拟数据轨 (真实知识状态 α* 已知)
@@ -442,7 +442,7 @@ if __name__ == "__main__":
 
     # 运行双轨评估
     evaluate_track_a(
-        env, encoder, d3qn,
+        env, d3qn,
         num_simulated_students=EVAL_NUM_SIMULATED,
         device=device,
         curve_save_path=os.path.join(DATA_DIR, 'eval_track_a_mse_curve.csv'),

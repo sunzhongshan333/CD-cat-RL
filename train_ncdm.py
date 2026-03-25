@@ -143,7 +143,7 @@ def train_ncdm_pipeline(data_dir, save_dir, batch_size=256, epochs=10, lr=0.002)
 
     with torch.no_grad():
         # 获取训练集中出现过的 user_ids
-        train_user_ids = torch.tensor(list(set(train_dataset.users.numpy())), dtype=torch.long).to(device)
+        train_user_ids = torch.tensor(sorted(set(train_dataset.users.tolist())), dtype=torch.long).to(device)
         # NCDM 的 student_emb 经过 sigmoid 就是掌握概率 [num_train_users, num_skills]
         mastery_probs = torch.sigmoid(model.student_emb(train_user_ids)).cpu().numpy()
 

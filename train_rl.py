@@ -122,7 +122,7 @@ def train_rl_pipeline():
 
     for episode in pbar:
         # 决定当前是 E-step 还是 Q-step (严格执行框架 7.3)
-        is_e_step = (episode // N_alt) % 2 == 0
+        is_e_step = ((episode - 1) // N_alt) % 2 == 0
 
         if is_e_step:
             encoder.train()

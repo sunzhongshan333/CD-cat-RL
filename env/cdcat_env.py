@@ -13,7 +13,7 @@ class CDCATEnv:
         self.ncdm = ncdm_model.to(self.device)
         self.encoder = encoder_model.to(self.device)
         self.ncdm.eval()  # 严格冻结教师模型
-        self.encoder.eval()  # 在环境交互(收集经验)阶段，编码器也处于 eval 模式
+        self.encoder.eval()  # 初始化为 eval；_get_current_state_and_entropy 在推断时会按需还原
 
         self.q_matrix = torch.tensor(q_matrix, dtype=torch.float32).to(self.device)
         self.num_items, self.num_skills = self.q_matrix.shape
@@ -64,7 +64,8 @@ class CDCATEnv:
 
     def _get_current_state_and_entropy(self):
         """
-        调用编码器生成当前状态 s_t，并计算当前的系统不确定性
+        调用编码器生成当前状态 s_t，并计算当前的系统不确定性。
+        数据收集阶段强制使用 eval 模式，确保 dropout 不干扰经验质量。
         """
         # 将变长历史转换为带 Padding 的 tensor (batch_size=1)
         padded_items = torch.full((1, self.max_steps), -1, dtype=torch.long).to(self.device)
@@ -76,9 +77,14 @@ class CDCATEnv:
 
         current_steps_tensor = torch.tensor([self.current_step], dtype=torch.long).to(self.device)
 
+        # 环境推断阶段强制 eval 模式（防止 E-step 训练时 dropout 污染状态）
+        was_training = self.encoder.training
+        self.encoder.eval()
         with torch.no_grad():
             s_t, mastery_logits = self.encoder(padded_items, padded_scores, current_steps_tensor)
             hat_alpha_t = torch.sigmoid(mastery_logits).squeeze(0)  # [num_skills]
+        if was_training:
+            self.encoder.train()
 
         max_entropy, mean_ent = self._calculate_entropy(hat_alpha_t)
         return s_t.squeeze(0), hat_alpha_t, max_entropy, mean_ent
@@ -125,7 +131,7 @@ class CDCATEnv:
             # 真实作答模拟 (NCDM 输出 logit，加 sigmoid 转为概率后伯努利采样)
             pred_prob = torch.sigmoid(self.ncdm.interaction_mlp(interaction)).squeeze(-1).item()
 
-            # 真实作答模拟 (伯努利硬采样)
+            # 伯努利硬采样：将概率转为 0/1 作答
             y_t = np.random.binomial(1, pred_prob)
 
         # ==========================================
