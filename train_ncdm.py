@@ -67,8 +67,10 @@ def train_ncdm_pipeline(data_dir, save_dir, batch_size=256, epochs=10, lr=0.002)
     train_dataset = ASSISTmentsDataset(os.path.join(data_dir, 'train.csv'))
     valid_dataset = ASSISTmentsDataset(os.path.join(data_dir, 'valid.csv'))
 
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    valid_loader = DataLoader(valid_dataset, batch_size=batch_size, shuffle=False)
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True,
+                              num_workers=4, pin_memory=(device.type == 'cuda'))
+    valid_loader = DataLoader(valid_dataset, batch_size=batch_size, shuffle=False,
+                              num_workers=4, pin_memory=(device.type == 'cuda'))
 
     q_matrix = np.load(os.path.join(data_dir, 'q_matrix.npy'))
     q_matrix_tensor = torch.tensor(q_matrix, dtype=torch.float32).to(device)
@@ -87,6 +89,10 @@ def train_ncdm_pipeline(data_dir, save_dir, batch_size=256, epochs=10, lr=0.002)
     # 损失函数与优化器 (严格的二元交叉熵)
     criterion = nn.BCELoss()
     optimizer = optim.Adam(model.parameters(), lr=lr)
+    # 当验证 AUC 连续 2 个 epoch 不提升时，将学习率乘以 0.5
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode='max', patience=2, factor=0.5
+    )
 
     best_auc = 0.0
 
@@ -112,6 +118,7 @@ def train_ncdm_pipeline(data_dir, save_dir, batch_size=256, epochs=10, lr=0.002)
             "Epoch %d/%d | Loss: %.4f | Val AUC: %.4f | Val RMSE: %.4f",
             epoch + 1, epochs, total_loss / len(train_loader), val_auc, val_rmse
         )
+        scheduler.step(val_auc)
 
         # 保存最佳模型
         if val_auc > best_auc:
@@ -145,6 +152,11 @@ def train_ncdm_pipeline(data_dir, save_dir, batch_size=256, epochs=10, lr=0.002)
     save_path = os.path.join(data_dir, 'train_student_mastery_probs.npy')
     np.save(save_path, mastery_probs)
     logger.info("经验分布已保存至: %s (Shape: %s)", save_path, mastery_probs.shape)
+
+    # 最终验证集 AUC 摘要（让用户快速确认训练质量）
+    final_auc, final_rmse = evaluate(model, valid_loader, q_matrix_tensor, device)
+    logger.info("最终验证集指标 — AUC: %.4f | RMSE: %.4f | 最佳 AUC: %.4f",
+                final_auc, final_rmse, best_auc)
     logger.info("阶段一圆满完成！")
 
 

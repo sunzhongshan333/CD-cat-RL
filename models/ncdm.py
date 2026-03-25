@@ -3,8 +3,10 @@ import torch.nn as nn
 
 
 class NCDM(nn.Module):
-    def __init__(self, num_students, num_items, num_skills, hidden_dims=[512, 256]):
+    def __init__(self, num_students, num_items, num_skills, hidden_dims=None):
         super(NCDM, self).__init__()
+        if hidden_dims is None:
+            hidden_dims = [512, 256]
         self.num_students = num_students
         self.num_items = num_items
         self.num_skills = num_skills

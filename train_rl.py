@@ -253,6 +253,12 @@ def train_rl_pipeline():
 
     logger.info("强化学习范式训练圆满结束！")
 
+    # 无条件保存最终模型，确保 max_episodes 不能整除 1000 时也不会丢失权重
+    os.makedirs(models_dir, exist_ok=True)
+    torch.save(encoder.state_dict(), os.path.join(models_dir, f'encoder_ep{max_episodes}.pth'))
+    torch.save(main_d3qn.state_dict(), os.path.join(models_dir, f'd3qn_ep{max_episodes}.pth'))
+    logger.info("最终权重已保存（encoder_ep%d.pth / d3qn_ep%d.pth）。", max_episodes, max_episodes)
+
 
 if __name__ == "__main__":
     train_rl_pipeline()

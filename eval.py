@@ -1,5 +1,6 @@
 import logging
 import os
+import random
 import torch
 import numpy as np
 import pandas as pd
@@ -296,7 +297,7 @@ def _run_track_b_policy(policy, ncdm, encoder, d3qn, grouped,
                         q_values = d3qn(s_t, mask_t.unsqueeze(0))
                         action = q_values.argmax(dim=1).item()
                 else:  # 'random'
-                    action = int(np.random.choice(available_pool_items))
+                    action = random.choice(available_pool_items)
 
                 real_score = pool_dict.pop(action)
                 current_step += 1

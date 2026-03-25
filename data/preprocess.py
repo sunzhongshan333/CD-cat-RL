@@ -56,9 +56,8 @@ def preprocess_assistments(raw_path, processed_dir):
     num_skills = len(skill_mapping)
     q_matrix = np.zeros((num_items, num_skills), dtype=int)
 
-    # ASSISTments 中一道题可能对应多行（不同 skill），遍历填充
-    for _, row in df.iterrows():
-        q_matrix[int(row['problem_id']), int(row['skill_id'])] = 1
+    # 向量化填充：直接用 numpy 花式索引，避免逐行 iterrows（O(N) Python 循环）
+    q_matrix[df['problem_id'].astype(int).values, df['skill_id'].astype(int).values] = 1
 
     # 为了后续方便，把每人每题的作答压成单行（因为前面去重了，这里直接 groupby 即可）
     df_final = df[['user_id', 'problem_id', 'correct']].drop_duplicates()

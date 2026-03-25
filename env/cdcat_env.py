@@ -155,7 +155,6 @@ class CDCATEnv:
             # 达到最大步数依然未达标，给予最后一次惩罚
             reward = min(-1.0 + self.beta * entropy_reduction, 0.0)
         else:
-            done = False
             # 继续测试，硬截断防止刷正奖励
             reward = min(-1.0 + self.beta * entropy_reduction, 0.0)
 
