@@ -1,11 +1,11 @@
 import logging
 import os
+import random
 import torch
 import torch.nn as nn
 import torch.optim as optim
 import numpy as np
 import pandas as pd
-import copy
 from tqdm import tqdm  # 新增进度条包
 
 # 导入我们的模块
@@ -24,6 +24,14 @@ def train_rl_pipeline():
     # ==========================================
     # 1. 基础配置与路径设置
     # ==========================================
+    # 全局随机种子，确保实验可复现
+    seed = cfg.RANDOM_SEED
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info("当前使用的计算设备是: %s", device)
 
@@ -44,6 +52,7 @@ def train_rl_pipeline():
     epsilon_start = cfg.RL_EPSILON_START
     epsilon_end = cfg.RL_EPSILON_END
     epsilon_decay = cfg.RL_EPSILON_DECAY
+    grad_clip = cfg.RL_GRAD_CLIP
 
     # ==========================================
     # 2. 加载冻结的 NCDM 教师模型
@@ -149,8 +158,8 @@ def train_rl_pipeline():
 
             # --- 执行动作，获取转移 ---
             # 记录执行前的状态变量供回放池使用
-            h_items_t = copy.deepcopy(env.history_item_ids)
-            h_scores_t = copy.deepcopy(env.history_scores)
+            h_items_t = list(env.history_item_ids)
+            h_scores_t = list(env.history_scores)
             step_t = env.current_step
             true_alpha_t = env.alpha_star.clone()
 
@@ -198,6 +207,7 @@ def train_rl_pipeline():
                     # 4. 计算辅助 BCE 损失
                     loss_aux = bce_loss(pred_y[b_masks], target_y[b_masks])
                     loss_aux.backward()
+                    torch.nn.utils.clip_grad_norm_(encoder.parameters(), grad_clip)
                     opt_encoder.step()
 
                 else:
@@ -221,6 +231,7 @@ def train_rl_pipeline():
 
                     loss_td = mse_loss(q_eval, target_q)
                     loss_td.backward()
+                    torch.nn.utils.clip_grad_norm_(main_d3qn.parameters(), grad_clip)
                     opt_d3qn.step()
 
             # --- 目标网络同步 ---

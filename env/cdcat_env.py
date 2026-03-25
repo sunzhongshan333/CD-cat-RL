@@ -1,10 +1,11 @@
 import numpy as np
 import torch
+import config as cfg
 
 
 class CDCATEnv:
     def __init__(self, ncdm_model, encoder_model, q_matrix, mastery_probs_path,
-                 max_steps=50, tau=0.3, beta=0.05, epsilon=0.1, device='cpu'):
+                 max_steps=50, tau=None, beta=None, epsilon=None, device='cpu'):
         """
         阶段三/四：CD-CAT 强化学习交互环境 (Gymnasium-style)
         """
@@ -19,9 +20,9 @@ class CDCATEnv:
 
         # 框架配置参数
         self.max_steps = max_steps
-        self.tau = tau
-        self.beta = beta
-        self.epsilon = epsilon
+        self.tau = tau if tau is not None else cfg.CDCAT_TAU
+        self.beta = beta if beta is not None else cfg.CDCAT_BETA
+        self.epsilon = epsilon if epsilon is not None else cfg.CDCAT_EPSILON
 
         # 加载阶段一生成的训练集学生先验经验分布 (Shape: [num_train_users, K])
         self.empirical_mastery_probs = np.load(mastery_probs_path)
@@ -144,7 +145,6 @@ class CDCATEnv:
 
         # 检查终止条件 (框架 2.5 节)
         done = False
-        reward = 0.0
 
         if max_entropy < self.tau:
             # 熵达标，诊断成功提前终止，给予正奖励激励智能体尽早完成
@@ -174,8 +174,8 @@ class CDCATEnv:
         获取当前可用动作的掩码，用于给 Q 网络的输出施加 -10^9 惩罚
         返回: [num_items] 的布尔型 tensor，True 表示可选，False 表示不可选
         """
-        mask = torch.zeros(self.num_items, dtype=torch.bool)
+        mask = torch.zeros(self.num_items, dtype=torch.bool, device=self.device)
         valid_indices = list(self.available_items)
         if valid_indices:
             mask[valid_indices] = True
-        return mask.to(self.device)
+        return mask

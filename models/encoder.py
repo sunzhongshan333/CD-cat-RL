@@ -177,6 +177,5 @@ class StateEncoder(nn.Module):
         仅输出掌握概率 \alpha_hat_t，不需要完整的状态向量。
         """
         with torch.no_grad():
-            self.eval()  # 开启 eval 模式，关闭 Dropout
             _, mastery_logits = self.forward(history_item_ids, history_scores, current_steps)
             return torch.sigmoid(mastery_logits)

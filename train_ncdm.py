@@ -1,5 +1,6 @@
 import logging
 import os
+import random
 import numpy as np
 import pandas as pd
 import torch
@@ -7,6 +8,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 from sklearn.metrics import roc_auc_score, mean_squared_error
+from tqdm import tqdm
 from models.ncdm import NCDM  # 引入我们刚才写的模型
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
@@ -50,6 +52,14 @@ def evaluate(model, dataloader, q_matrix, device):
 
 # 3. 主训练循环
 def train_ncdm_pipeline(data_dir, save_dir, batch_size=256, epochs=10, lr=0.002):
+    from config import RANDOM_SEED
+    seed = RANDOM_SEED
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info("当前使用设备: %s", device)
 
@@ -85,7 +95,7 @@ def train_ncdm_pipeline(data_dir, save_dir, batch_size=256, epochs=10, lr=0.002)
         model.train()
         total_loss = 0.0
 
-        for users, items, labels in train_loader:
+        for users, items, labels in tqdm(train_loader, desc=f"Epoch {epoch + 1}/{epochs}", leave=False):
             users, items, labels = users.to(device), items.to(device), labels.to(device)
 
             optimizer.zero_grad()
