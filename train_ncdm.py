@@ -39,8 +39,8 @@ def evaluate(model, dataloader, q_matrix, device):
     with torch.no_grad():
         for users, items, labels in dataloader:
             users, items = users.to(device), items.to(device)
-            # NCDM 前向传播
-            preds = model(users, items, q_matrix)
+            # NCDM 前向传播输出 logits，加 sigmoid 转为概率
+            preds = torch.sigmoid(model(users, items, q_matrix))
 
             y_true.extend(labels.numpy())
             y_pred.extend(preds.cpu().numpy())
@@ -79,15 +79,13 @@ def train_ncdm_pipeline(data_dir, save_dir, batch_size=256, epochs=10, lr=0.002)
     # 注意：为了防止 Embedding 越界，总人数和题数应该从全部数据集的最大 ID 中推断，
     # 但由于我们之前做了连续重映射，这里直接取 Q 矩阵的 shape 和全体去重 user 数即可。
     num_items, num_skills = q_matrix.shape
-    # 获取所有的 user_id 最大值以确定 Embedding 大小
-    all_users = set(train_dataset.users.numpy()) | set(valid_dataset.users.numpy())
-    num_students = max(all_users) + 1
+    num_students = max(train_dataset.users.max().item(), valid_dataset.users.max().item()) + 1
 
     logger.info("初始化 NCDM: 学生数=%d, 题目数=%d, 知识点数=%d", num_students, num_items, num_skills)
     model = NCDM(num_students, num_items, num_skills).to(device)
 
-    # 损失函数与优化器 (严格的二元交叉熵)
-    criterion = nn.BCELoss()
+    # 损失函数与优化器 (BCEWithLogitsLoss 内置 log-sum-exp trick，数值更稳定)
+    criterion = nn.BCEWithLogitsLoss()
     optimizer = optim.Adam(model.parameters(), lr=lr)
     # 当验证 AUC 连续 2 个 epoch 不提升时，将学习率乘以 0.5
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(

@@ -25,7 +25,11 @@ def load_models(device, data_dir, models_dir, max_steps, checkpoint_ep=5000):
     num_items, num_skills = q_matrix.shape
     q_matrix_tensor = torch.tensor(q_matrix, dtype=torch.float32).to(device)
     mastery_probs_path = os.path.join(data_dir, 'train_student_mastery_probs.npy')
-    num_students = np.load(mastery_probs_path).shape[0]
+
+    # 从原始训练/验证集 CSV 中推断最大 user_id，与 NCDM 训练时保持一致
+    train_df = pd.read_csv(os.path.join(data_dir, 'train.csv'))
+    valid_df = pd.read_csv(os.path.join(data_dir, 'valid.csv'))
+    num_students = int(max(train_df['user_id'].max(), valid_df['user_id'].max())) + 1
 
     # 1. 加载 NCDM
     ncdm = NCDM(num_students, num_items, num_skills).to(device)
@@ -212,7 +216,8 @@ def _predict_holdout(ncdm, hat_alpha, holdout_items_tensor, q_matrix_tensor):
         e_d, e_a = ncdm.get_frozen_item_features(holdout_items_tensor)
         q_vec = q_matrix_tensor[holdout_items_tensor]
         interaction = hat_alpha * q_vec * e_a - e_d
-        pred_probs = ncdm.interaction_mlp(interaction).squeeze(-1).cpu().numpy()
+        # NCDM interaction_mlp 输出原始 logit，加 sigmoid 转为概率
+        pred_probs = torch.sigmoid(ncdm.interaction_mlp(interaction)).squeeze(-1).cpu().numpy()
     return pred_probs
 
 

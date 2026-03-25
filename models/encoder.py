@@ -5,7 +5,6 @@ import torch.nn as nn
 class StateEncoder(nn.Module):
     def __init__(self, q_matrix_tensor, frozen_item_diff_tensor, frozen_item_disc_tensor,
                  d1=256, d2=256, max_steps=50):
-        super(StateEncoder, self).__init__()
         """
         阶段二：置换不变状态编码器 (包含掌握概率映射头)
 
@@ -17,6 +16,7 @@ class StateEncoder(nn.Module):
             d2: 整体变换 rho 的隐层和输出维度 (h_t 的维度)
             max_steps: 测试最大题数上限 H_max
         """
+        super(StateEncoder, self).__init__()
 
         # 1. 注册基础数据 (注册为 buffer，跟随模型 save/load，且不作为需要优化的参数)
         self.register_buffer('q_matrix', q_matrix_tensor)  # [num_items, num_skills]

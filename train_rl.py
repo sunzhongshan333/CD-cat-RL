@@ -61,7 +61,6 @@ def train_rl_pipeline():
     num_items, num_skills = q_matrix.shape
     q_matrix_tensor = torch.tensor(q_matrix, dtype=torch.float32).to(device)
 
-    # 恢复 train_ncdm.py 中的计算逻辑，获取真实的全局最大学生数以对齐 Embedding 维度
     train_df = pd.read_csv(os.path.join(data_dir, 'train.csv'))
     valid_df = pd.read_csv(os.path.join(data_dir, 'valid.csv'))
     all_users = set(train_df['user_id'].values) | set(valid_df['user_id'].values)
@@ -106,7 +105,7 @@ def train_rl_pipeline():
     # 优化器
     opt_encoder = optim.Adam(encoder.parameters(), lr=lr_encoder)
     opt_d3qn = optim.Adam(main_d3qn.parameters(), lr=lr_d3qn)
-    bce_loss = nn.BCELoss()
+    bce_loss = nn.BCEWithLogitsLoss()  # 内置 log-sum-exp trick，数值更稳定
     mse_loss = nn.MSELoss()
 
     # 回放池
@@ -193,19 +192,20 @@ def train_rl_pipeline():
                     s_batch, mastery_logits = encoder(b_h_items, b_h_scores, b_steps)
                     hat_alpha = torch.sigmoid(mastery_logits)  # [batch, K]
 
-                    # 2. 构建预测输出的软标签 (仅在未答题目 mask_t 上计算)
+                    # 2. 构建学生预测的 interaction logits（未答题目上计算）
                     interaction_pred = hat_alpha.unsqueeze(1) * q_matrix_tensor.unsqueeze(0) * frozen_e_a.unsqueeze(
                         0) - frozen_e_d.unsqueeze(0)
-                    pred_y = ncdm.interaction_mlp(interaction_pred).squeeze(-1)  # [batch, num_items]
+                    pred_logits = ncdm.interaction_mlp(interaction_pred).squeeze(-1)  # [batch, num_items]
 
                     # 3. 构建教师给出的真实软标签 (使用模拟的真实状态 alpha^*)
                     with torch.no_grad():
                         interaction_teacher = b_true_alphas.unsqueeze(1) * q_matrix_tensor.unsqueeze(
                             0) * frozen_e_a.unsqueeze(0) - frozen_e_d.unsqueeze(0)
-                        target_y = ncdm.interaction_mlp(interaction_teacher).squeeze(-1)
+                        # 教师输出加 sigmoid，作为 [0,1] 软标签供 BCEWithLogitsLoss 使用
+                        target_y = torch.sigmoid(ncdm.interaction_mlp(interaction_teacher).squeeze(-1))
 
-                    # 4. 计算辅助 BCE 损失
-                    loss_aux = bce_loss(pred_y[b_masks], target_y[b_masks])
+                    # 4. 计算辅助 BCE 损失 (BCEWithLogitsLoss 接收 logit 输入，数值稳定)
+                    loss_aux = bce_loss(pred_logits[b_masks], target_y[b_masks])
                     loss_aux.backward()
                     torch.nn.utils.clip_grad_norm_(encoder.parameters(), grad_clip)
                     opt_encoder.step()
@@ -254,10 +254,11 @@ def train_rl_pipeline():
     logger.info("强化学习范式训练圆满结束！")
 
     # 无条件保存最终模型，确保 max_episodes 不能整除 1000 时也不会丢失权重
-    os.makedirs(models_dir, exist_ok=True)
-    torch.save(encoder.state_dict(), os.path.join(models_dir, f'encoder_ep{max_episodes}.pth'))
-    torch.save(main_d3qn.state_dict(), os.path.join(models_dir, f'd3qn_ep{max_episodes}.pth'))
-    logger.info("最终权重已保存（encoder_ep%d.pth / d3qn_ep%d.pth）。", max_episodes, max_episodes)
+    if max_episodes % 1000 != 0:
+        os.makedirs(models_dir, exist_ok=True)
+        torch.save(encoder.state_dict(), os.path.join(models_dir, f'encoder_ep{max_episodes}.pth'))
+        torch.save(main_d3qn.state_dict(), os.path.join(models_dir, f'd3qn_ep{max_episodes}.pth'))
+        logger.info("最终权重已保存（encoder_ep%d.pth / d3qn_ep%d.pth）。", max_episodes, max_episodes)
 
 
 if __name__ == "__main__":

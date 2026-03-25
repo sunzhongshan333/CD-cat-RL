@@ -24,13 +24,13 @@ class ReplayBuffer:
         存入原始交互元组，而不是编码后的 s_t，严格遵循延迟编码设计。
         """
         self.buffer.append((
-            list(h_items),  # Y_t 题目
-            list(h_scores),  # Y_t 结果
+            h_items,  # 调用方已保证是快照（list 拷贝），无需再次复制
+            h_scores,  # 同上
             step,  # 当前步数 t
             action,  # a_t
             reward,  # r_t
-            list(next_h_items),  # Y_{t+1} 题目
-            list(next_h_scores),  # Y_{t+1} 结果
+            list(next_h_items),  # Y_{t+1} 题目（env 引用，需在此处拷贝）
+            list(next_h_scores),  # Y_{t+1} 结果（同上）
             next_step,  # 下一步数 t+1
             mask,  # R_t (可选题目掩码)
             next_mask,  # R_{t+1}

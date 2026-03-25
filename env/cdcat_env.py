@@ -122,7 +122,8 @@ class CDCATEnv:
 
             # 核心机制：绕过 embedding，直接用 alpha_star 与题目参数交互
             interaction = self.alpha_star.unsqueeze(0) * q_vec * e_a - e_d
-            pred_prob = self.ncdm.interaction_mlp(interaction).squeeze(-1).item()
+            # 真实作答模拟 (NCDM 输出 logit，加 sigmoid 转为概率后伯努利采样)
+            pred_prob = torch.sigmoid(self.ncdm.interaction_mlp(interaction)).squeeze(-1).item()
 
             # 真实作答模拟 (伯努利硬采样)
             y_t = np.random.binomial(1, pred_prob)

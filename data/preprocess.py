@@ -23,8 +23,8 @@ def preprocess_assistments(raw_path, processed_dir):
     df = df.sort_values(by=['order_id'])
     df = df.drop_duplicates(subset=['user_id', 'problem_id'], keep='first')
 
-    # 将 correct 严格二值化
-    df['correct'] = df['correct'].apply(lambda x: 1 if x >= 1 else 0)
+    # 将 correct 严格二值化（向量化，避免逐行 apply）
+    df['correct'] = (df['correct'] >= 1).astype(int)
 
     logger.info("3. 执行清洗规则：过滤低频数据...")
     # 丢弃被作答少于 10 次的题目
@@ -59,8 +59,8 @@ def preprocess_assistments(raw_path, processed_dir):
     # 向量化填充：直接用 numpy 花式索引，避免逐行 iterrows（O(N) Python 循环）
     q_matrix[df['problem_id'].astype(int).values, df['skill_id'].astype(int).values] = 1
 
-    # 为了后续方便，把每人每题的作答压成单行（因为前面去重了，这里直接 groupby 即可）
-    df_final = df[['user_id', 'problem_id', 'correct']].drop_duplicates()
+    # 步骤 2 已对 (user_id, problem_id) 去重，此处直接投影即可
+    df_final = df[['user_id', 'problem_id', 'correct']]
 
     logger.info("6. Student-level 7:1:2 数据划分...")
     users = df_final['user_id'].unique()
