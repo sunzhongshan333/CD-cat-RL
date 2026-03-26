@@ -35,7 +35,7 @@ def load_models(device, data_dir, models_dir, max_steps, checkpoint_ep=5000):
     ncdm = NCDM(num_students, num_items, num_skills).to(device)
     ncdm_ckpt = os.path.join(models_dir, 'ncdm_best.pth')
     try:
-        ncdm.load_state_dict(torch.load(ncdm_ckpt, map_location=device))
+        ncdm.load_state_dict(torch.load(ncdm_ckpt, map_location=device, weights_only=True))
     except FileNotFoundError:
         logger.error("找不到 NCDM 权重文件: %s", ncdm_ckpt)
         raise
@@ -52,7 +52,7 @@ def load_models(device, data_dir, models_dir, max_steps, checkpoint_ep=5000):
     encoder = StateEncoder(q_matrix_tensor, frozen_e_d, frozen_e_a, max_steps=max_steps).to(device)
     encoder_ckpt = os.path.join(models_dir, f'encoder_ep{checkpoint_ep}.pth')
     try:
-        encoder.load_state_dict(torch.load(encoder_ckpt, map_location=device))
+        encoder.load_state_dict(torch.load(encoder_ckpt, map_location=device, weights_only=True))
     except FileNotFoundError:
         logger.error("找不到 Encoder 权重文件: %s", encoder_ckpt)
         raise
@@ -66,7 +66,7 @@ def load_models(device, data_dir, models_dir, max_steps, checkpoint_ep=5000):
     d3qn = D3QN(state_dim, action_dim=num_items).to(device)
     d3qn_ckpt = os.path.join(models_dir, f'd3qn_ep{checkpoint_ep}.pth')
     try:
-        d3qn.load_state_dict(torch.load(d3qn_ckpt, map_location=device))
+        d3qn.load_state_dict(torch.load(d3qn_ckpt, map_location=device, weights_only=True))
     except FileNotFoundError:
         logger.error("找不到 D3QN 权重文件: %s", d3qn_ckpt)
         raise
@@ -133,8 +133,8 @@ def evaluate_track_a(env, d3qn, num_simulated_students=500, device='cpu',
         final_step = env.current_step
         total_steps += final_step
 
-        # 终止原因判断：熵达标 vs 到达最大步数
-        if info['max_entropy'] < env.tau:
+        # 终止原因判断：熵达标（与 env 停止条件保持一致：平均熵 < τ）vs 到达最大步数
+        if info['mean_entropy'] < env.tau:
             early_stop_count += 1
 
         pred_alpha = info['pred_alpha']
@@ -290,10 +290,11 @@ def _run_track_b_policy(policy, ncdm, encoder, d3qn, grouped,
                     s_t, mastery_logits = encoder(pad_items, pad_scores, step_tensor)
                     hat_alpha = torch.sigmoid(mastery_logits).squeeze(0)   # [K]
 
-                # 熵达标提前终止
+                # 平均エントロピーで早期停止（max エントロピーは K=105 の高次元では
+                # ほぼ常に閾値を超えるため、訓練環境の報酬関数と同じ平均エントロピーを使用）
                 p = torch.clamp(hat_alpha, 1e-7, 1.0 - 1e-7)
                 entropy = -p * torch.log(p) - (1 - p) * torch.log(1 - p)
-                if torch.max(entropy).item() < tau:
+                if torch.mean(entropy).item() < tau:
                     break
 
                 available_pool_items = list(pool_dict.keys())

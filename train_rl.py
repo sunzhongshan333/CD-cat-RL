@@ -177,7 +177,9 @@ def train_rl_pipeline():
 
             # --- 动作选择（信息引导探索代替纯随机 ε-greedy）---
             if np.random.rand() < epsilon:
-                # 信息引导探索：优先选覆盖当前高熵知识点的题目
+                # 信息引导随机探索：按信息量分布进行概率采样
+                # 使用 softmax 而非 argmax，保证经验多样性（避免每步选同一道题
+                # 导致回放缓冲区同质化，使 D3QN 无法学习有效策略）
                 with torch.no_grad():
                     hat_alpha = env.current_hat_alpha          # [K]
                     p = torch.clamp(hat_alpha, 1e-7, 1.0 - 1e-7)
@@ -185,7 +187,9 @@ def train_rl_pipeline():
                     valid_indices = torch.where(mask_t)[0]              # [num_valid]
                     valid_q = env.q_matrix[valid_indices]               # [num_valid, K]
                     item_scores = (valid_q * skill_entropy.unsqueeze(0)).sum(dim=1)  # [num_valid]
-                    action = valid_indices[item_scores.argmax().item()].item()
+                    # 温度缩放 softmax 后按概率采样，兼顾信息引导与随机性
+                    probs = torch.softmax(item_scores, dim=0)
+                    action = valid_indices[torch.multinomial(probs, 1).item()].item()
             else:
                 # D3QN 贪心选择
                 with torch.no_grad():

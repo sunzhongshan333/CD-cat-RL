@@ -55,15 +55,17 @@ RL_PER_EPS = 1e-6           # 优先级平滑常数（防止零优先级）
 RL_LOSS_PLATEAU_WINDOW = 20      # 用于平台检测的损失窗口大小（优化步数）
 RL_LOSS_PLATEAU_MIN_STEPS = 50   # 每阶段至少完成的优化步数后才允许切换
 RL_LOSS_PLATEAU_THRESHOLD = 5e-4 # 窗口前半段与后半段均值差低于此值则认为平台
-RL_E_STEP_NEG_SAMPLES = 512      # E-step 软标签损失的负采样题目数（远小于 num_items=9128）
+RL_E_STEP_NEG_SAMPLES = 2048     # E-step 软标签损失的负采样题目数（原 512 梯度信号较弱，
+                                 # 2048 ≈ 22% 覆盖率，大幅提升编码器收敛速度）
 
 # ==========================================
 # CD-CAT 环境超参数
 # ==========================================
-CDCAT_TAU = 0.3             # 诊断终止的不确定性（最大熵）阈值
-CDCAT_BETA = 0.05           # 奖励中的熵减权重
+CDCAT_TAU = 0.3             # 诊断终止的不确定性（平均熵）阈值
+CDCAT_BETA = 2.0            # 奖励中的熵减权重（原 0.05 过小：beta*delta_H << step_cost，
+                            # D3QN 无法区分好坏动作；2.0 使好题能获得正奖励）
 CDCAT_EPSILON = 0.1         # 经验分布退化为均匀采样的概率
-CDCAT_STEP_COST = 0.1       # 每步固定代价（塑形奖励：r = beta*dH - step_cost）
+CDCAT_STEP_COST = 0.05      # 每步固定代价（原 0.1 过大：完全掩盖熵减信号）
 CDCAT_SUCCESS_REWARD = 1.0  # 诊断成功（熵达标）时的终止正奖励
 
 # ==========================================

@@ -164,7 +164,10 @@ class CDCATEnv:
         # 检查终止条件 (框架 2.5 节)
         done = False
 
-        if max_entropy < self.tau:
+        # 修正: 平均エントロピーで停止判定（報酬関数 entropy_reduction = mean - mean_next と一致）
+        # max_entropy は K=105 の高次元空間では閾値を下回ることがほぼなく、
+        # 成功報酬がほぼ発生せず D3QN が学習不能になる問題を修正。
+        if mean_ent_next < self.tau:
             # 熵达标，诊断成功提前终止，给予正奖励激励智能体尽早完成
             done = True
             reward = self.success_reward
@@ -181,7 +184,8 @@ class CDCATEnv:
             'true_alpha': self.alpha_star.cpu().numpy(),
             'pred_alpha': hat_alpha_next.cpu().numpy(),
             'entropy_reduction': entropy_reduction,
-            'max_entropy': max_entropy
+            'max_entropy': max_entropy,
+            'mean_entropy': mean_ent_next,  # 停止判定に使われる値を明示的に公開
         }
 
         return s_next, reward, done, info
