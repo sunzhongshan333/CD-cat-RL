@@ -4,7 +4,7 @@ import torch.nn.functional as F
 
 
 class D3QN(nn.Module):
-    def __init__(self, state_dim, action_dim, hidden_dims=[512, 256]):
+    def __init__(self, state_dim, action_dim, hidden_dims=None):
         """
         阶段三：Double Dueling DQN 决策网络
 
@@ -14,6 +14,8 @@ class D3QN(nn.Module):
             hidden_dims: 共享隐藏层和分支隐藏层的维度配置
         """
         super(D3QN, self).__init__()
+        if hidden_dims is None:
+            hidden_dims = [512, 256]
         self.state_dim = state_dim
         self.action_dim = action_dim
 

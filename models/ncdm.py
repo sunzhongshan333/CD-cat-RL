@@ -1,11 +1,12 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 
 class NCDM(nn.Module):
-    def __init__(self, num_students, num_items, num_skills, hidden_dims=[512, 256]):
+    def __init__(self, num_students, num_items, num_skills, hidden_dims=None):
         super(NCDM, self).__init__()
+        if hidden_dims is None:
+            hidden_dims = [512, 256]
         self.num_students = num_students
         self.num_items = num_items
         self.num_skills = num_skills
@@ -26,7 +27,9 @@ class NCDM(nn.Module):
             layers.append(nn.Dropout(0.2))
             input_dim = h_dim
         layers.append(nn.Linear(input_dim, 1))
-        layers.append(nn.Sigmoid())  # 输出 0-1 的作答概率
+        # 注意：MLP 输出原始 Logit，不含 Sigmoid。
+        # 训练时配合 BCEWithLogitsLoss 获得更好的数值稳定性；
+        # 推断时需在调用方手动加 torch.sigmoid()。
 
         self.interaction_mlp = nn.Sequential(*layers)
 
@@ -55,10 +58,10 @@ class NCDM(nn.Module):
         # 只有该题考查的知识点 (q_vec=1) 才会参与运算
         interaction = e_s * q_vec * e_a - e_d
 
-        # 4. MLP 预测答对概率
-        pred_prob = self.interaction_mlp(interaction)
+        # 4. MLP 输出原始 Logit（调用方需手动加 sigmoid 转为概率）
+        pred_logit = self.interaction_mlp(interaction)
 
-        return pred_prob.squeeze(-1)
+        return pred_logit.squeeze(-1)
 
     def get_frozen_item_features(self, item_ids):
         """

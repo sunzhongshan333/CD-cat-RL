@@ -1,12 +1,11 @@
 import numpy as np
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
+import config as cfg
 
 
 class CDCATEnv:
     def __init__(self, ncdm_model, encoder_model, q_matrix, mastery_probs_path,
-                 max_steps=50, tau=0.3, beta=0.05, epsilon=0.1, device='cpu'):
+                 max_steps=50, tau=None, beta=None, epsilon=None, step_cost=None, device='cpu'):
         """
         阶段三/四：CD-CAT 强化学习交互环境 (Gymnasium-style)
         """
@@ -14,32 +13,44 @@ class CDCATEnv:
         self.ncdm = ncdm_model.to(self.device)
         self.encoder = encoder_model.to(self.device)
         self.ncdm.eval()  # 严格冻结教师模型
-        self.encoder.eval()  # 在环境交互(收集经验)阶段，编码器也处于 eval 模式
+        self.encoder.eval()  # 初始化为 eval；_get_current_state_and_entropy
+                             # 会在推断时暂存并恢复 encoder 的 train/eval 状态
 
         self.q_matrix = torch.tensor(q_matrix, dtype=torch.float32).to(self.device)
         self.num_items, self.num_skills = self.q_matrix.shape
 
         # 框架配置参数
         self.max_steps = max_steps
-        self.tau = tau
-        self.beta = beta
-        self.epsilon = epsilon
+        self.tau = tau if tau is not None else cfg.CDCAT_TAU
+        self.beta = beta if beta is not None else cfg.CDCAT_BETA
+        self.epsilon = epsilon if epsilon is not None else cfg.CDCAT_EPSILON
+        self.step_cost = step_cost if step_cost is not None else cfg.CDCAT_STEP_COST
+        self.success_reward = cfg.CDCAT_SUCCESS_REWARD
 
         # 加载阶段一生成的训练集学生先验经验分布 (Shape: [num_train_users, K])
         self.empirical_mastery_probs = np.load(mastery_probs_path)
         self.num_empirical_students = self.empirical_mastery_probs.shape[0]
 
         # 内部状态变量
-        self.alpha_star = None  # 模拟学生的真实知识状态
+        self.alpha_star = None  # 模拟学生的连续知识掌握概率（不再硬二值化）
         self.history_item_ids = []  # 答题历史 ID
         self.history_scores = []  # 答题历史 结果
         self.available_items = set(range(self.num_items))  # 剩余可选题目池
         self.current_step = 0
         self.current_mean_entropy = None  # \bar{H}_t
+        self.current_hat_alpha = None     # 编码器最新输出的掌握概率，用于信息引导探索
+
+        # 预分配热路径张量，避免每步重复申请 GPU 内存
+        self._padded_items = torch.full((1, self.max_steps), -1, dtype=torch.long, device=self.device)
+        self._padded_scores = torch.full((1, self.max_steps), -1, dtype=torch.long, device=self.device)
+        self._step_tensor = torch.zeros(1, dtype=torch.long, device=self.device)
 
     def _sample_simulated_student(self):
         """
         严格对应框架 7.2 节：鲁棒经验采样生成器
+
+        改进：保留连续掌握概率（不再做伯努利硬二值化），
+        消除训练与真实学生之间的 sim-to-real 分布差距。
         """
         if np.random.rand() < self.epsilon:
             # \epsilon 概率退化为全空间均匀采样，保证探索多样性
@@ -49,8 +60,8 @@ class CDCATEnv:
             idx = np.random.randint(0, self.num_empirical_students)
             probs = self.empirical_mastery_probs[idx]
 
-        # 独立伯努利采样生成真实的二值知识状态 \alpha^* \in {0,1}^K
-        alpha_star = np.random.binomial(1, probs).astype(np.float32)
+        # 直接保留连续掌握概率，不做硬二值化
+        alpha_star = probs.astype(np.float32)
         return torch.tensor(alpha_star).to(self.device)
 
     def _calculate_entropy(self, mastery_probs):
@@ -65,24 +76,25 @@ class CDCATEnv:
 
     def _get_current_state_and_entropy(self):
         """
-        调用编码器生成当前状态 s_t，并计算当前的系统不确定性
+        调用编码器生成当前状态 s_t，并计算当前的系统不确定性。
+        数据收集阶段强制使用 eval 模式，确保 dropout 不干扰经验质量。
         """
-        # 将变长历史转换为带 Padding 的 tensor (batch_size=1)
-        padded_items = torch.full((1, self.max_steps), -1, dtype=torch.long).to(self.device)
-        padded_scores = torch.full((1, self.max_steps), -1, dtype=torch.long).to(self.device)
+        # _padded_items / _padded_scores 由 reset() 清零、step() 增量写入，此处无需重建
+        self._step_tensor.fill_(self.current_step)
 
-        if self.current_step > 0:
-            padded_items[0, :self.current_step] = torch.tensor(self.history_item_ids).to(self.device)
-            padded_scores[0, :self.current_step] = torch.tensor(self.history_scores).to(self.device)
-
-        current_steps_tensor = torch.tensor([self.current_step], dtype=torch.long).to(self.device)
-
+        # 环境推断阶段强制 eval 模式（防止 E-step 训练时 dropout 污染状态）
+        was_training = self.encoder.training
+        self.encoder.eval()
         with torch.no_grad():
-            s_t, mastery_logits = self.encoder(padded_items, padded_scores, current_steps_tensor)
+            s_t, mastery_logits = self.encoder(
+                self._padded_items, self._padded_scores, self._step_tensor)
             hat_alpha_t = torch.sigmoid(mastery_logits).squeeze(0)  # [num_skills]
+        if was_training:
+            self.encoder.train()
 
-        max_ent, mean_ent = self._calculate_entropy(hat_alpha_t)
-        return s_t.squeeze(0), hat_alpha_t, max_ent, mean_ent
+        max_entropy, mean_ent = self._calculate_entropy(hat_alpha_t)
+        self.current_hat_alpha = hat_alpha_t  # 供信息引导探索使用
+        return s_t.squeeze(0), hat_alpha_t, max_entropy, mean_ent
 
     def reset(self):
         """
@@ -96,6 +108,8 @@ class CDCATEnv:
         self.history_scores = []
         self.available_items = set(range(self.num_items))
         self.current_step = 0
+        self._padded_items.fill_(-1)
+        self._padded_scores.fill_(-1)
 
         # 3. 获取初始状态 s_0 (全空历史)
         s_0, _, _, mean_ent = self._get_current_state_and_entropy()
@@ -123,9 +137,10 @@ class CDCATEnv:
 
             # 核心机制：绕过 embedding，直接用 alpha_star 与题目参数交互
             interaction = self.alpha_star.unsqueeze(0) * q_vec * e_a - e_d
-            pred_prob = self.ncdm.interaction_mlp(interaction).squeeze(-1).item()
+            # 真实作答模拟 (NCDM 输出 logit，加 sigmoid 转为概率后伯努利采样)
+            pred_prob = torch.sigmoid(self.ncdm.interaction_mlp(interaction)).squeeze(-1).item()
 
-            # 真实作答模拟 (伯努利硬采样)
+            # 伯努利硬采样：将概率转为 0/1 作答
             y_t = np.random.binomial(1, pred_prob)
 
         # ==========================================
@@ -135,37 +150,43 @@ class CDCATEnv:
         self.history_scores.append(y_t)
         self.available_items.remove(action_item_id)
         self.current_step += 1
+        # 增量维护预分配的历史张量，避免每步从 Python list 重建
+        self._padded_items[0, self.current_step - 1] = action_item_id
+        self._padded_scores[0, self.current_step - 1] = y_t
 
-        s_next, hat_alpha_next, max_ent, mean_ent_next = self._get_current_state_and_entropy()
+        s_next, hat_alpha_next, max_entropy, mean_ent_next = self._get_current_state_and_entropy()
 
         # ==========================================
         # 3. 计算混合奖励 -> 框架 2.4 节
         # ==========================================
-        delta_H_t = self.current_mean_entropy - mean_ent_next
+        entropy_reduction = self.current_mean_entropy - mean_ent_next
         self.current_mean_entropy = mean_ent_next  # 更新状态
 
         # 检查终止条件 (框架 2.5 节)
         done = False
-        reward = 0.0
 
-        if max_ent < self.tau:
+        # 修正: 平均エントロピーで停止判定（報酬関数 entropy_reduction = mean - mean_next と一致）
+        # max_entropy は K=105 の高次元空間では閾値を下回ることがほぼなく、
+        # 成功報酬がほぼ発生せず D3QN が学習不能になる問題を修正。
+        if mean_ent_next < self.tau:
+            # 熵达标，诊断成功提前终止，给予正奖励激励智能体尽早完成
             done = True
-            reward = 0.0  # 达标，终止，奖励为 0
-        elif self.current_step >= self.max_steps:
-            done = True
-            # 达到最大步数依然未达标，给予最后一次惩罚
-            reward = min(-1.0 + self.beta * delta_H_t, 0.0)
+            reward = self.success_reward
         else:
-            done = False
-            # 继续测试，硬截断防止刷正奖励
-            reward = min(-1.0 + self.beta * delta_H_t, 0.0)
+            # 塑形奖励：每步熵减奖励 - 固定步骤代价
+            # 去掉 min(..., 0.0) 硬截断，让熵减带来的正信号可以传递，
+            # 解决奖励稀疏问题并改善 credit assignment
+            if self.current_step >= self.max_steps:
+                done = True
+            reward = self.beta * entropy_reduction - self.step_cost
 
         info = {
             'y_t': y_t,
             'true_alpha': self.alpha_star.cpu().numpy(),
             'pred_alpha': hat_alpha_next.cpu().numpy(),
-            'delta_H_t': delta_H_t,
-            'max_ent': max_ent
+            'entropy_reduction': entropy_reduction,
+            'max_entropy': max_entropy,
+            'mean_entropy': mean_ent_next,  # 停止判定に使われる値を明示的に公開
         }
 
         return s_next, reward, done, info
@@ -175,8 +196,8 @@ class CDCATEnv:
         获取当前可用动作的掩码，用于给 Q 网络的输出施加 -10^9 惩罚
         返回: [num_items] 的布尔型 tensor，True 表示可选，False 表示不可选
         """
-        mask = torch.zeros(self.num_items, dtype=torch.bool)
+        mask = torch.zeros(self.num_items, dtype=torch.bool, device=self.device)
         valid_indices = list(self.available_items)
         if valid_indices:
             mask[valid_indices] = True
-        return mask.to(self.device)
+        return mask

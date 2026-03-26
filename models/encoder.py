@@ -1,12 +1,10 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 
 class StateEncoder(nn.Module):
     def __init__(self, q_matrix_tensor, frozen_item_diff_tensor, frozen_item_disc_tensor,
                  d1=256, d2=256, max_steps=50):
-        super(StateEncoder, self).__init__()
         """
         阶段二：置换不变状态编码器 (包含掌握概率映射头)
 
@@ -18,6 +16,7 @@ class StateEncoder(nn.Module):
             d2: 整体变换 rho 的隐层和输出维度 (h_t 的维度)
             max_steps: 测试最大题数上限 H_max
         """
+        super(StateEncoder, self).__init__()
 
         # 1. 注册基础数据 (注册为 buffer，跟随模型 save/load，且不作为需要优化的参数)
         self.register_buffer('q_matrix', q_matrix_tensor)  # [num_items, num_skills]
@@ -61,6 +60,11 @@ class StateEncoder(nn.Module):
         # 输入 h_t (d2) -> 输出各知识点的掌握 Logit -> 后续加 Sigmoid 为概率
         # 对应框架 5.4 节：在线毫秒级推断的核心路径
         self.mapping_head = nn.Linear(d2, num_skills)
+
+    @property
+    def state_dim(self):
+        """返回编码器输出的完整状态向量维度: d2 + num_skills + 1"""
+        return self.d2 + self.num_skills + 1
 
     def forward(self, history_item_ids, history_scores, current_steps):
         """
@@ -161,15 +165,20 @@ class StateEncoder(nn.Module):
         # s_t 维度应当是: d2 + num_skills + 1
         # shape: [batch_size, d2 + num_skills + 1]
         final_state = torch.cat([h_t, hat_alpha_t, norm_timesteps], dim=1)
+        assert final_state.shape[1] == self.state_dim, (
+            f"状态维度不匹配：期望 {self.state_dim}，实际 {final_state.shape[1]}"
+        )
 
         return final_state, mastery_logits
 
     def get_hat_alpha(self, history_item_ids, history_scores, current_steps):
         """
         在线部署流程专用便捷方法 (8.2/8.7 节)
-        仅输出掌握概率 \alpha_hat_t，不需要完整的状态向量。
+        仅输出掌握概率 \\alpha_hat_t，不需要完整的状态向量。
+
+        注意：调用方需自行管理模型的 train/eval 状态。
+        推理时请在调用前执行 encoder.eval()。
         """
         with torch.no_grad():
-            self.eval()  # 开启 eval 模式，关闭 Dropout
             _, mastery_logits = self.forward(history_item_ids, history_scores, current_steps)
             return torch.sigmoid(mastery_logits)
