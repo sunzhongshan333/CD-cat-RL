@@ -10,6 +10,7 @@ from torch.utils.data import Dataset, DataLoader
 from sklearn.metrics import roc_auc_score, mean_squared_error
 from tqdm import tqdm
 from models.ncdm import NCDM  # 引入我们刚才写的模型
+from utils.health_monitor import NCDMTrainingMonitor
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 logger = logging.getLogger(__name__)
@@ -93,6 +94,7 @@ def train_ncdm_pipeline(data_dir, save_dir, batch_size=256, epochs=10, lr=0.002)
     )
 
     best_auc = 0.0
+    ncdm_monitor = NCDMTrainingMonitor()
 
     logger.info("开始训练 NCDM 教师模型...")
     for epoch in range(epochs):
@@ -118,6 +120,12 @@ def train_ncdm_pipeline(data_dir, save_dir, batch_size=256, epochs=10, lr=0.002)
         )
         scheduler.step(val_auc)
 
+        # 健康检查（NaN 检测、AUC 平台检测）
+        ncdm_monitor.check_epoch(
+            epoch + 1, epochs,
+            total_loss / len(train_loader), val_auc, val_rmse
+        )
+
         # 保存最佳模型
         if val_auc > best_auc:
             best_auc = val_auc
@@ -125,14 +133,16 @@ def train_ncdm_pipeline(data_dir, save_dir, batch_size=256, epochs=10, lr=0.002)
             torch.save(model.state_dict(), os.path.join(save_dir, 'ncdm_best.pth'))
             logger.info("  --> 发现更优模型，已保存。")
 
+    # 最终健康验收
+    ncdm_monitor.final_check()
+
     # ==========================================
-    # 关键步骤：提取并保存训练集学生的先验知识分布
     # 对应框架 4.5 节：推断训练集学生的知识状态
     # ==========================================
     logger.info("\n训练结束。开始提取训练集学生的知识掌握经验分布...")
     checkpoint_path = os.path.join(save_dir, 'ncdm_best.pth')
     try:
-        model.load_state_dict(torch.load(checkpoint_path, map_location=device))
+        model.load_state_dict(torch.load(checkpoint_path, map_location=device, weights_only=True))
     except FileNotFoundError:
         logger.error("找不到最优模型文件: %s", checkpoint_path)
         raise

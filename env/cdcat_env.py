@@ -13,7 +13,8 @@ class CDCATEnv:
         self.ncdm = ncdm_model.to(self.device)
         self.encoder = encoder_model.to(self.device)
         self.ncdm.eval()  # 严格冻结教师模型
-        self.encoder.eval()  # 初始化为 eval；_get_current_state_and_entropy 在推断时会按需还原
+        self.encoder.eval()  # 初始化为 eval；_get_current_state_and_entropy
+                             # 会在推断时暂存并恢复 encoder 的 train/eval 状态
 
         self.q_matrix = torch.tensor(q_matrix, dtype=torch.float32).to(self.device)
         self.num_items, self.num_skills = self.q_matrix.shape

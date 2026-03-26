@@ -16,6 +16,10 @@ from agent.d3qn import D3QN
 from agent.replay_buffer import PrioritizedReplayBuffer
 from env.cdcat_env import CDCATEnv
 import config as cfg
+from utils.health_monitor import (
+    RLTrainingMonitor, check_rl_config,
+    compute_grad_norm, check_grad_norm, check_loss_health,
+)
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 logger = logging.getLogger(__name__)
@@ -139,6 +143,15 @@ def train_rl_pipeline():
     # 4. 主训练循环 (自适应交替优化范式)
     # ==========================================
     total_steps = 0
+
+    # --- 健康监控器初始化 ---
+    # 在训练开始前执行超参数配置预检，发现潜在问题立即预警
+    check_rl_config(cfg)
+    rl_monitor = RLTrainingMonitor(
+        grad_clip=grad_clip,
+        step_cost=cfg.CDCAT_STEP_COST,
+        max_steps=max_steps,
+    )
     logger.info("开始强化学习范式训练...")
 
     # --- 自适应交替优化状态 ---
@@ -167,6 +180,10 @@ def train_rl_pipeline():
         # 环境复位
         s_t = env.reset()
         done = False
+        # episode 级别的监控积累变量
+        episode_total_reward = 0.0
+        last_e_loss = None
+        last_q_loss = None
 
         # 计算当前探索率
         epsilon = epsilon_end + (epsilon_start - epsilon_end) * \
@@ -178,7 +195,7 @@ def train_rl_pipeline():
             # --- 动作选择（信息引导探索代替纯随机 ε-greedy）---
             if np.random.rand() < epsilon:
                 # 信息引导随机探索：按信息量分布进行概率采样
-                # 使用 softmax 而非 argmax，保证经验多样性（避免每步选同一道题
+                # 使用 softmax 而非 argmax，保证经验多样性（避免每步选同一道题，
                 # 导致回放缓冲区同质化，使 D3QN 无法学习有效策略）
                 with torch.no_grad():
                     hat_alpha = env.current_hat_alpha          # [K]
@@ -195,6 +212,8 @@ def train_rl_pipeline():
                 with torch.no_grad():
                     q_values = main_d3qn(s_t.unsqueeze(0), mask_t.unsqueeze(0))
                     action = q_values.argmax(dim=1).item()
+                # 定期检测 Q 值是否退化（每 CHECK_INTERVAL 个 episode 输出一次预警）
+                rl_monitor.check_q_diversity(q_values, episode)
 
             # --- 执行动作，获取转移 ---
             h_items_t = list(env.history_item_ids)
@@ -205,6 +224,7 @@ def train_rl_pipeline():
             s_next, reward, done, info = env.step(action)
             mask_next = env.get_action_mask()
             total_steps += 1
+            episode_total_reward += reward   # 累积本 episode 总奖励（供健康监控使用）
 
             # --- 存入优先经验回放池 ---
             buffer.push(h_items_t, h_scores_t, step_t, action, reward,
@@ -282,9 +302,12 @@ def train_rl_pipeline():
                         loss_aux = loss_soft
 
                     loss_aux.backward()
+                    # 健康检查：梯度范数（在 clip 之前，反映真实梯度幅度）
+                    rl_monitor.check_update(loss_aux.item(), encoder, "E-step")
                     torch.nn.utils.clip_grad_norm_(encoder.parameters(), grad_clip)
                     opt_encoder.step()
                     did_update = True
+                    last_e_loss = loss_aux.item()   # 记录供 record_episode 使用
 
                     # 自适应交替：追踪 E-step 损失
                     e_step_losses.append(loss_aux.item())
@@ -321,9 +344,12 @@ def train_rl_pipeline():
                     td_errors_sq = (q_eval - target_q) ** 2        # [batch, 1]
                     loss_td = (b_is_weights * td_errors_sq).mean()
                     loss_td.backward()
+                    # 健康检查：梯度范数（在 clip 之前）
+                    rl_monitor.check_update(loss_td.item(), main_d3qn, "Q-step")
                     torch.nn.utils.clip_grad_norm_(main_d3qn.parameters(), grad_clip)
                     opt_d3qn.step()
                     did_update = True
+                    last_q_loss = loss_td.item()    # 记录供 record_episode 使用
                     with torch.no_grad():
                         td_errors_np = (q_eval - target_q).abs().squeeze(1).cpu().numpy()
                     buffer.update_priorities(b_indices, td_errors_np)
@@ -346,8 +372,15 @@ def train_rl_pipeline():
             scheduler_encoder.step()
             scheduler_d3qn.step()
 
+        # --- 健康监控：积累 episode 数据并执行定期综合检查 ---
+        early_stopped_this_ep = info.get('mean_entropy', float('inf')) < env.tau
+        rl_monitor.record_episode(episode_total_reward, early_stopped_this_ep,
+                                  e_loss=last_e_loss, q_loss=last_q_loss)
+        rl_monitor.periodic_check(episode)
+
         # 实时将当前状态更新到进度条尾部，方便监控
-        pbar.set_postfix({'Phase': phase_str, 'Steps': env.current_step, 'Epsilon': f"{epsilon:.3f}"})
+        pbar.set_postfix({'Phase': phase_str, 'Steps': env.current_step,
+                          'Epsilon': f"{epsilon:.3f}", 'R': f"{episode_total_reward:.2f}"})
 
         # 每 1000 轮保存一次 Checkpoint
         if episode % 1000 == 0:

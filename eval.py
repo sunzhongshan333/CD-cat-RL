@@ -14,6 +14,7 @@ from models.ncdm import NCDM
 from models.encoder import StateEncoder
 from agent.d3qn import D3QN
 from env.cdcat_env import CDCATEnv
+from utils.health_monitor import EvalMonitor
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 logger = logging.getLogger(__name__)
@@ -185,6 +186,9 @@ def evaluate_track_a(env, d3qn, num_simulated_students=500, device='cpu',
     logger.info("[Track A 结果] 掌握判断 Precision: %.4f", prec)
     logger.info("[Track A 结果] 掌握判断 Recall:    %.4f", rec)
     logger.info("[Track A 结果] 掌握判断 F1:        %.4f", f1)
+
+    # ── 健康检查：自动识别不合理的评估结果并给出诊断建议 ──────────────
+    EvalMonitor.check_track_a(avg_mse, per_skill_acc, early_stop_rate, f1)
 
     # ── MSE@K 效率曲线 (可选保存) ────────────────────────────────────
     if curve_save_path is not None:
@@ -410,6 +414,9 @@ def evaluate_track_b(ncdm, encoder, d3qn, test_csv_path, q_matrix_tensor,
                f"{r['auc']:>8.4f} {r['rmse']:>8.4f} {r['acc']:>8.4f} "
                f"{r['f1']:>8.4f} {r['log_loss']:>9.4f}")
         logger.info(row)
+
+    # ── 健康检查：自动识别策略退化、AUC 过低等问题 ───────────────────
+    EvalMonitor.check_track_b(results)
 
     # ── AUC@K 效率曲线 (可选保存) ─────────────────────────────────────
     if curve_save_path is not None:
