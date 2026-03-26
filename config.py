@@ -29,7 +29,7 @@ NCDM_LR = 0.002
 # ==========================================
 RL_MAX_STEPS = 50           # H_max：每轮测试最大题数
 RL_BATCH_SIZE = 128
-RL_GAMMA = 0.99             # 奖励折扣因子
+RL_GAMMA = 0.95             # 奖励折扣因子（0.99过高：50步episode下自举放大Q值高估，改0.95收敛更稳定）
 RL_LR_ENCODER = 1e-4        # 编码器学习率
 RL_LR_D3QN = 1e-4           # 策略网络学习率
 RL_BUFFER_CAPACITY = 50000
@@ -40,7 +40,7 @@ RL_MAX_EPISODES = 5000      # 总训练轮数
 RL_EPSILON_START = 1.0      # 初始探索率
 RL_EPSILON_END = 0.05       # 最低探索率
 RL_EPSILON_DECAY = 2000     # 探索率衰减控制（单位：episode）
-RL_GRAD_CLIP = 10.0         # 梯度裁剪最大范数（DQN 场景 Q 值梯度量级较大，10.0 为常用经验值）
+RL_GRAD_CLIP = 1.0          # 梯度裁剪最大范数（配合Huber Loss使用，1.0有效限制单步更新幅度）
 
 # --- 目标网络 Polyak 软更新 ---
 RL_POLYAK_TAU = 0.005       # θ_target ← τ·θ_main + (1-τ)·θ_target，每步执行

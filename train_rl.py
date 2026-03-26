@@ -4,6 +4,7 @@ import random
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import torch.nn.functional as F
 import numpy as np
 import pandas as pd
 from collections import deque
@@ -344,9 +345,11 @@ def train_rl_pipeline():
                     # 计算当前评估的 Q 值
                     q_eval = main_d3qn(s_batch, b_masks).gather(1, b_actions)
 
-                    # IS 权重加权 TD 损失（PER 无偏修正）
-                    td_errors_sq = (q_eval - target_q) ** 2        # [batch, 1]
-                    loss_td = (b_is_weights * td_errors_sq).mean()
+                    # IS 权重加权 Huber Loss（PER 无偏修正）
+                    # 使用 smooth_l1_loss 代替 MSE：大误差时退化为线性梯度，
+                    # 截断 "Q 值高估 → 大 TD 误差 → MSE 梯度爆炸 → Q 值更高" 的正反馈回路
+                    loss_td = (b_is_weights * F.smooth_l1_loss(
+                        q_eval, target_q, reduction='none')).mean()
                     loss_td.backward()
                     # 健康检查：梯度范数（在 clip 之前）
                     rl_monitor.check_update(loss_td.item(), main_d3qn, "Q-step")
