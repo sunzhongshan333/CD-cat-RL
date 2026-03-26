@@ -166,7 +166,11 @@ def train_rl_pipeline():
     for episode in pbar:
         # 本 episode 所属阶段（上一步优化后可能已切换，这里生效）
         is_e_step = (current_phase == 'e_step')
-        did_update = False  # 本 episode 是否执行了至少一次参数更新（用于守护 scheduler）
+        # 分别追踪 encoder / D3QN 各自是否在本 episode 完成了参数更新。
+        # 必须分开追踪：只更新了 encoder 时不能推进 scheduler_d3qn（反之亦然），
+        # 否则会触发 PyTorch "lr_scheduler.step() before optimizer.step()" 警告。
+        did_encoder_update = False
+        did_q_update = False
 
         if is_e_step:
             encoder.train()
@@ -306,7 +310,7 @@ def train_rl_pipeline():
                     rl_monitor.check_update(loss_aux.item(), encoder, "E-step")
                     torch.nn.utils.clip_grad_norm_(encoder.parameters(), grad_clip)
                     opt_encoder.step()
-                    did_update = True
+                    did_encoder_update = True
                     last_e_loss = loss_aux.item()   # 记录供 record_episode 使用
 
                     # 自适应交替：追踪 E-step 损失
@@ -348,7 +352,7 @@ def train_rl_pipeline():
                     rl_monitor.check_update(loss_td.item(), main_d3qn, "Q-step")
                     torch.nn.utils.clip_grad_norm_(main_d3qn.parameters(), grad_clip)
                     opt_d3qn.step()
-                    did_update = True
+                    did_q_update = True
                     last_q_loss = loss_td.item()    # 记录供 record_episode 使用
                     with torch.no_grad():
                         td_errors_np = (q_eval - target_q).abs().squeeze(1).cpu().numpy()
@@ -366,10 +370,12 @@ def train_rl_pipeline():
         # ==========================================
         # 6. 周期性日志打印与模型保存
         # ==========================================
-        # 每个 episode 结束后推进学习率调度；仅在本 episode 有参数更新时才推进，
-        # 避免缓冲区未满的冷启动阶段触发 "scheduler before optimizer" 警告
-        if did_update:
+        # 每个 episode 结束后推进学习率调度。
+        # 每个 scheduler 只在其对应的 optimizer 本 episode 中实际调用过 step() 时才推进，
+        # 防止触发 PyTorch "lr_scheduler.step() before optimizer.step()" 警告。
+        if did_encoder_update:
             scheduler_encoder.step()
+        if did_q_update:
             scheduler_d3qn.step()
 
         # --- 健康监控：积累 episode 数据并执行定期综合检查 ---

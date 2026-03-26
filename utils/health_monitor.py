@@ -295,6 +295,7 @@ class RLTrainingMonitor:
     CHECK_INTERVAL      = 200      # 综合周期检查间隔（episodes）
     MIN_EARLY_STOP_RATE = 0.02     # 早停率低于此值才告警（近 500 ep 窗口）
     Q_VALUE_STD_MIN     = 0.05     # Q 值标准差低于此值认为策略退化
+    Q_VALUE_ABS_WARN    = 20.0     # Q 值绝对均值超过此阈值告警（当前奖励尺度下不合理）
     REWARD_FLAT_STD     = 0.05     # 奖励标准差低于此值认为"奖励固定"
 
     def __init__(self, grad_clip: float, step_cost: float, max_steps: int):
@@ -307,6 +308,9 @@ class RLTrainingMonitor:
         self.e_step_losses    = deque(maxlen=self.CHECK_INTERVAL)
         self.q_step_losses    = deque(maxlen=self.CHECK_INTERVAL)
         self.early_stop_flags = deque(maxlen=500)   # 更大窗口用于早停率
+
+        # Q 值绝对均值历史（用于检测单调上升趋势）
+        self._q_abs_mean_history: deque = deque(maxlen=10)
 
         # 连续 NaN 计数器（连续出现 NaN 才 ERROR，偶发仅 WARNING）
         self._nan_streak = 0
@@ -349,7 +353,7 @@ class RLTrainingMonitor:
 
     def check_q_diversity(self, q_values, episode: int) -> None:
         """
-        检查 Q 值是否退化（所有可用动作 Q 值几乎相同）。
+        检查 Q 值是否退化（标准差过低）或单调上升（绝对均值持续增大）。
 
         Parameters
         ----------
@@ -362,7 +366,13 @@ class RLTrainingMonitor:
         valid_q = q_values[q_values > -1e8]
         if valid_q.numel() < 2:
             return
-        std = valid_q.std().item()
+        std       = valid_q.std().item()
+        abs_mean  = valid_q.abs().mean().item()
+
+        # 记录绝对均值历史，用于趋势检测
+        self._q_abs_mean_history.append(abs_mean)
+
+        # ── 1. 退化：Q 值标准差过低 ──────────────────────────────
         if std < self.Q_VALUE_STD_MIN:
             logger.warning(_fmt_warn(
                 f"[Episode {episode}] D3QN Q 值标准差 {std:.5f}"
@@ -370,6 +380,30 @@ class RLTrainingMonitor:
                 "策略可能已退化为均匀分配。"
                 "建议检查奖励信号强度（CDCAT_BETA）或增加 RL 训练轮数。"
             ))
+
+        # ── 2. 爆炸：Q 值绝对均值超过合理范围 ──────────────────
+        if abs_mean > self.Q_VALUE_ABS_WARN:
+            logger.warning(_fmt_warn(
+                f"[Episode {episode}] D3QN Q 值绝对均值 {abs_mean:.2f}"
+                f" > {self.Q_VALUE_ABS_WARN}（Q 值可能在发散）。"
+                "在当前奖励尺度下，Q 值不应超过此范围。"
+                "建议降低 RL_LR_D3QN 或减小 RL_POLYAK_TAU。"
+            ))
+
+        # ── 3. 趋势：连续多次检查均呈单调上升 ──────────────────
+        if len(self._q_abs_mean_history) >= 4:
+            hist = list(self._q_abs_mean_history)
+            # 检测后半段是否单调递增
+            monotone_up = all(hist[i] < hist[i + 1] for i in range(len(hist) // 2, len(hist) - 1))
+            growth_ratio = hist[-1] / (hist[0] + 1e-9)
+            if monotone_up and growth_ratio > 3.0:
+                logger.warning(_fmt_warn(
+                    f"[Episode {episode}] D3QN Q 值绝对均值持续单调上升"
+                    f"（{hist[0]:.2f} → {hist[-1]:.2f}，{growth_ratio:.1f}×）。"
+                    "这是 Q 值发散的早期信号。"
+                    "建议：① 降低 RL_LR_D3QN；② 减小 RL_POLYAK_TAU；"
+                    "③ 确认 Huber Loss（smooth_l1_loss）已替换 MSE。"
+                ))
 
     # ------------------------------------------------------------------
     # 每个 episode 结束后调用
